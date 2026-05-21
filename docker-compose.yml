@@ -1,0 +1,66 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: 2care_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: twocare
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d twocare"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: 2care_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - PROJECT_NAME=2Care AI
+      - ENV=development
+      - DEBUG=true
+      - HOST=0.0.0.0
+      - PORT=8000
+      - SECRET_KEY=supersecretkeythatisatleast32characterslongforsecurity
+      - ACCESS_TOKEN_EXPIRE_MINUTES=11520
+      - ALGORITHM=HS256
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/twocare
+      - BACKEND_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - AUDIO_SAMPLE_RATE=16000
+      - AUDIO_CHANNELS=1
+      - AUDIO_CHUNK_SIZE=1024
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: 2care_frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api/v1
+      - VITE_WS_URL=ws://localhost:8000/api/v1
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
