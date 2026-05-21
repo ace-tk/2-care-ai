@@ -25,6 +25,10 @@ class LLMService:
             "If a user asks about medical advice, politely decline and redirect them to speak with a physician."
         )
         logger.info("OpenAI LLM service initialized with GPT-4o-mini.")
+        
+        # Initialize LangGraph Orchestrator
+        from backend.app.services.orchestrator_graph import build_orchestrator_graph
+        self.orchestrator = build_orchestrator_graph(api_key)
 
     def _build_messages(self, prompt: str, history: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Helper to build OpenAI messages array from session history."""
@@ -45,20 +49,40 @@ class LLMService:
     async def generate_response(
         self, prompt: str, history: List[Dict[str, str]]
     ) -> str:
-        """Generates a conversational response based on history and new prompt."""
-        logger.debug(f"Generating LLM response for prompt: '{prompt[:30]}...'")
-        messages = self._build_messages(prompt, history)
+        """Generates a conversational response using the LangGraph orchestrator."""
+        logger.debug(f"Generating LangGraph response for prompt: '{prompt[:30]}...'")
+        
+        # Convert history into LangChain messages
+        from langchain_core.messages import HumanMessage, AIMessage
+        lc_messages = []
+        for msg in history:
+            role = msg.get("sender", "user")
+            text = msg.get("text", "")
+            if role == "ai" or role == "assistant":
+                lc_messages.append(AIMessage(content=text))
+            else:
+                lc_messages.append(HumanMessage(content=text))
+                
+        if prompt:
+            lc_messages.append(HumanMessage(content=prompt))
+            
+        initial_state = {
+            "messages": lc_messages,
+            "intent": "",
+            "patient_context": {}
+        }
         
         try:
-            response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=300,
-            )
-            return response.choices[0].message.content or ""
+            # Run the graph
+            final_state = await self.orchestrator.ainvoke(initial_state)
+            
+            # The last message in final_state["messages"] should be the AI response
+            if final_state and "messages" in final_state and len(final_state["messages"]) > 0:
+                last_message = final_state["messages"][-1]
+                return last_message.content or ""
+            return "No response generated."
         except Exception as e:
-            logger.error(f"Error generating OpenAI response: {e}")
+            logger.error(f"Error executing LangGraph orchestrator: {e}", exc_info=True)
             return "I apologize, but I am currently unable to process your request."
 
     async def stream_response(
