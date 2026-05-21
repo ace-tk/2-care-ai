@@ -65,13 +65,13 @@ class VoiceService:
         logger.info(f"Started voice session state for {session_id} (Patient: {patient_id})")
         return state
 
-    async def process_audio_chunk(self, session_id: str, chunk: bytes):
+    async def process_audio_chunk(self, session_id: str, chunk: bytes, recv_time: float = None):
         """Processes incoming audio packet.
         
         1. Accumulates binary audio.
-        2. Calls STT service to get transcript.
-        3. Broadcasts intermediate transcription back to patient/clinician.
+        2. Logs chunk metrics and transmission timing.
         """
+        import time
         state = self.active_sessions.get(session_id)
         websocket = self.active_sockets.get(session_id)
         
@@ -82,45 +82,21 @@ class VoiceService:
         # 1. Accumulate audio bytes
         state.audio_chunks.append(chunk)
 
-        try:
-            # 2. Transcribe chunk (multilingual logic inside STT)
-            stt_result = await self.stt.transcribe_chunk(
-                chunk, 
-                sample_rate=settings.AUDIO_SAMPLE_RATE,
-                language="auto"
-            )
-            
-            transcript = stt_result.get("transcript", "")
-            lang = stt_result.get("language", "en")
-            
-            if transcript:
-                # Store history
-                state.transcript_history.append(transcript)
-                if lang not in state.detected_languages:
-                    state.detected_languages.append(lang)
-                
-                # In production: Translate transcript if it's not the clinician's language
-                translated = await self.llm.translate_text(transcript, source_language=lang, target_language="en")
-                state.translation_history.append(translated)
+        # 2. Log audio chunk metadata
+        chunk_size = len(chunk)
+        process_time = time.time()
+        timing_ms = (process_time - recv_time) * 1000 if recv_time else 0.0
+        
+        logger.info(
+            f"[AUDIO_PIPELINE] Session {session_id[:8]} | "
+            f"Chunk Size: {chunk_size:4d} bytes | "
+            f"Queue/Processing Latency: {timing_ms:.2f} ms | "
+            f"Total Chunks: {len(state.audio_chunks)}"
+        )
 
-                # 3. Broadcast real-time transcription to client
-                await websocket.send_json({
-                    "event": "transcript_diff",
-                    "session_id": session_id,
-                    "payload": {
-                        "original_text": transcript,
-                        "translated_text": translated,
-                        "language": lang,
-                        "is_final": stt_result.get("is_final", False)
-                    }
-                })
-        except Exception as e:
-            logger.error(f"Error processing audio in session {session_id}: {e}", exc_info=True)
-            await websocket.send_json({
-                "event": "error",
-                "session_id": session_id,
-                "payload": {"message": f"Error transcribing audio: {str(e)}"}
-            })
+        # Skip STT for now as requested by user ("Do not implement transcription yet.")
+        # We will keep the architecture ready for when STT is integrated.
+        pass
 
     async def finalize_session(self, session_id: str, db: AsyncSession) -> Transcript:
         """Ends streaming, generates SOAP clinical notes, and saves to database."""

@@ -1,6 +1,7 @@
 import logging
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends
+import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.database import AsyncSessionLocal
@@ -50,8 +51,11 @@ async def websocket_voice_endpoint(
                 
                 # Handle binary audio frame
                 if "bytes" in message:
+                    recv_time = time.time()
                     audio_data = message["bytes"]
-                    await voice_service.process_audio_chunk(session_id, audio_data)
+                    chunk_size = len(audio_data)
+                    logger.debug(f"[WS_EVENT] Received binary audio frame for {session_id} (Size: {chunk_size} bytes)")
+                    await voice_service.process_audio_chunk(session_id, audio_data, recv_time)
                     
                 # Handle text control message (JSON format)
                 elif "text" in message:
