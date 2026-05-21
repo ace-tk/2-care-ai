@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useVoiceWebSocket } from './features/voice/hooks/useVoiceWebSocket';
 import { VoiceVisualizer } from './components/voice/VoiceVisualizer';
 import type { Patient } from './types';
@@ -48,8 +48,25 @@ export const App: React.FC = () => {
     clinicalSummary,
     startCall,
     stopCall,
+    sendChatMessage,
+    chatHistory,
     error,
   } = useVoiceWebSocket();
+
+  const [chatInput, setChatInput] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
+
+  const handleSendChat = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (chatInput.trim()) {
+      sendChatMessage(chatInput);
+      setChatInput('');
+    }
+  };
 
   const handleCallToggle = () => {
     if (callState === 'idle' || callState === 'completed') {
@@ -258,6 +275,83 @@ export const App: React.FC = () => {
               </div>
             </div>
 
+          </div>
+
+          {/* Realtime Chat Panel */}
+          <div className="glass-card chat-box" style={{ marginTop: '1.5rem' }}>
+            <h3 className="panel-title">Realtime Consultation Chat</h3>
+            <div 
+              className="chat-history" 
+              style={{ 
+                height: '200px', 
+                overflowY: 'auto', 
+                padding: '1rem', 
+                background: 'rgba(0,0,0,0.2)', 
+                borderRadius: '8px',
+                marginBottom: '1rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.5rem'
+              }}
+            >
+              {chatHistory.length === 0 ? (
+                <div className="placeholder-text" style={{ textAlign: 'center', marginTop: '2rem' }}>
+                  No messages yet. Send a message to the AI.
+                </div>
+              ) : (
+                chatHistory.map((msg, idx) => (
+                  <div 
+                    key={idx} 
+                    style={{ 
+                      alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start',
+                      background: msg.sender === 'user' ? 'var(--accent-indigo)' : 'var(--bg-dark)',
+                      color: msg.sender === 'user' ? '#fff' : 'var(--text-primary)',
+                      padding: '0.5rem 1rem',
+                      borderRadius: '12px',
+                      maxWidth: '80%',
+                      border: msg.sender === 'ai' ? '1px solid var(--border-color)' : 'none'
+                    }}
+                  >
+                    <strong>{msg.sender === 'user' ? 'You' : 'AI'}:</strong> {msg.text}
+                  </div>
+                ))
+              )}
+              <div ref={chatEndRef} />
+            </div>
+            
+            <form onSubmit={handleSendChat} style={{ display: 'flex', gap: '0.5rem' }}>
+              <input 
+                type="text" 
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Type a message..."
+                disabled={connectionState !== 'connected'}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem',
+                  borderRadius: '8px',
+                  background: 'var(--bg-dark)',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-primary)',
+                  outline: 'none'
+                }}
+              />
+              <button 
+                type="submit" 
+                disabled={connectionState !== 'connected' || !chatInput.trim()}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  borderRadius: '8px',
+                  background: 'var(--accent-indigo)',
+                  color: '#fff',
+                  border: 'none',
+                  cursor: connectionState === 'connected' && chatInput.trim() ? 'pointer' : 'not-allowed',
+                  opacity: connectionState === 'connected' && chatInput.trim() ? 1 : 0.6
+                }}
+              >
+                Send
+              </button>
+            </form>
           </div>
 
         </section>

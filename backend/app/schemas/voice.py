@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 class VoiceControlMessage(BaseModel):
     """Base schema for client-initiated control messages sent over WebSocket."""
-    type: Literal["start", "stop", "config", "pause", "resume"]
+    type: Literal["start", "stop", "config", "pause", "resume", "text"]
     payload: Optional[Dict[str, Any]] = None
 
 
@@ -24,7 +24,8 @@ class VoiceServerEvent(BaseModel):
         "transcript_diff", 
         "audio_response", 
         "summary_completed", 
-        "error"
+        "error",
+        "chat_response"
     ]
     session_id: str
     payload: Dict[str, Any]

@@ -12,6 +12,8 @@ export interface UseVoiceWebSocketResult {
   clinicalSummary: string;
   startCall: (patientId: number, sourceLanguage?: string) => Promise<void>;
   stopCall: () => void;
+  sendChatMessage: (text: string) => void;
+  chatHistory: { sender: 'user' | 'ai'; text: string }[];
   error: string | null;
 }
 
@@ -22,6 +24,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
   const [translatedText, setTranslatedText] = useState('');
   const [detectedLanguage, setDetectedLanguage] = useState('en');
   const [clinicalSummary, setClinicalSummary] = useState('');
+  const [chatHistory, setChatHistory] = useState<{ sender: 'user' | 'ai'; text: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Audio Context Ref variables
@@ -67,16 +70,22 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       setError(data.payload.message || 'Server error occurred');
     };
 
+    const handleChatResponse = (data: any) => {
+      setChatHistory((prev) => [...prev, { sender: 'ai', text: data.payload.text }]);
+    };
+
     voiceWebSocketClient.on('started', handleStarted);
     voiceWebSocketClient.on('transcript_diff', handleTranscriptDiff);
     voiceWebSocketClient.on('summary_completed', handleSummaryCompleted);
     voiceWebSocketClient.on('error', handleServerError);
+    voiceWebSocketClient.on('chat_response', handleChatResponse);
 
     return () => {
       voiceWebSocketClient.off('started', handleStarted);
       voiceWebSocketClient.off('transcript_diff', handleTranscriptDiff);
       voiceWebSocketClient.off('summary_completed', handleSummaryCompleted);
       voiceWebSocketClient.off('error', handleServerError);
+      voiceWebSocketClient.off('chat_response', handleChatResponse);
     };
   }, []);
 
@@ -86,6 +95,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       setOriginalText('');
       setTranslatedText('');
       setClinicalSummary('');
+      setChatHistory([]);
       setCallState('idle');
 
       // Fetch JWT token from storage
@@ -167,6 +177,23 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     cleanupAudio();
   };
 
+  const sendChatMessage = (text: string) => {
+    if (!text.trim()) return;
+    
+    // Add user message to history
+    setChatHistory((prev) => [...prev, { sender: 'user', text }]);
+    
+    // Send over websocket
+    if (voiceWebSocketClient) {
+      voiceWebSocketClient.send(
+        JSON.stringify({
+          type: 'text',
+          payload: { text }
+        })
+      );
+    }
+  };
+
   const cleanupAudio = () => {
     if (processorRef.current) {
       processorRef.current.disconnect();
@@ -201,6 +228,8 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     clinicalSummary,
     startCall,
     stopCall,
+    sendChatMessage,
+    chatHistory,
     error,
   };
 }

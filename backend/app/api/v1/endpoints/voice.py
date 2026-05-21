@@ -90,6 +90,15 @@ async def websocket_voice_endpoint(
                             # Break loop and close connection since session is finished
                             break
                             
+                        elif msg_type == "text":
+                            user_text = payload.get("text", "")
+                            # Mock AI response to fulfill requirements without real AI integration
+                            await manager.send_personal_message({
+                                "event": "chat_response",
+                                "session_id": session_id,
+                                "payload": {"text": f"AI: {user_text}", "sender": "ai"}
+                            }, session_id)
+                            
                         else:
                             await websocket.send_json({
                                 "event": "error",
