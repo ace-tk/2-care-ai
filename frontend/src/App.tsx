@@ -222,6 +222,13 @@ export const App: React.FC = () => {
                 {error}
               </div>
             )}
+            
+            {/* Latency Log Section Placeholder */}
+            <div className="latency-log" style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'center', gap: '1.5rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              <span>STT Latency: <strong style={{ color: 'var(--accent-emerald)' }}>-- ms</strong></span>
+              <span>LLM Reasoning: <strong style={{ color: 'var(--accent-indigo)' }}>-- ms</strong></span>
+              <span>TTS Latency: <strong style={{ color: 'var(--accent-rose)' }}>-- ms</strong></span>
+            </div>
           </div>
 
           {/* Transcription Logs and AI SOAP Summary Panel */}
@@ -352,6 +359,36 @@ export const App: React.FC = () => {
                 Send
               </button>
             </form>
+          </div>
+
+          {/* AI Reasoning Trace Panel Placeholder */}
+          <div className="glass-card reasoning-box" style={{ marginTop: '1.5rem' }}>
+            <h3 className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+              AI Clinical Reasoning Trace
+            </h3>
+            <div 
+              style={{ 
+                padding: '1rem', 
+                background: 'rgba(0,0,0,0.2)', 
+                borderRadius: '8px',
+                fontFamily: 'monospace',
+                fontSize: '0.85rem',
+                color: 'var(--text-secondary)'
+              }}
+            >
+              {callState === 'processing' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  <span style={{ color: 'var(--accent-indigo)' }}>&gt; Analyzing patient transcript for clinical entities...</span>
+                  <span style={{ color: 'var(--accent-indigo)', opacity: 0.8 }}>&gt; Cross-referencing ICD-10 codes with reported symptoms...</span>
+                  <span style={{ color: 'var(--accent-indigo)', opacity: 0.6 }}>&gt; Generating differential diagnosis hypotheses...</span>
+                </div>
+              ) : (
+                <div className="placeholder-text">
+                  AI internal reasoning steps, safety checks, and medical references will appear here during active processing...
+                </div>
+              )}
+            </div>
           </div>
 
         </section>
