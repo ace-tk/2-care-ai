@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.database import AsyncSessionLocal
 from backend.app.core.security import verify_token
 from backend.app.services.voice_service import voice_service
+from backend.app.services.connection_manager import manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -36,15 +37,9 @@ async def websocket_voice_endpoint(
     creator_id = int(user_id_str)
     session_id = str(uuid.uuid4())
     
-    await websocket.accept()
+    await manager.connect(session_id, websocket)
+    # Also register with voice_service (though manager handles the WS transport)
     await voice_service.register_connection(session_id, websocket)
-
-    # Send initial connection confirmation event
-    await websocket.send_json({
-        "event": "connected",
-        "session_id": session_id,
-        "payload": {"message": "Voice WebSocket server connection established."}
-    })
 
     # Start database session for this long-lived WebSocket lifecycle
     async with AsyncSessionLocal() as db:
@@ -121,6 +116,7 @@ async def websocket_voice_endpoint(
             logger.error(f"WebSocket crash in session {session_id}: {e}", exc_info=True)
         finally:
             # Cleanup resources
+            manager.disconnect(session_id)
             await voice_service.unregister_connection(session_id)
             try:
                 await websocket.close()
