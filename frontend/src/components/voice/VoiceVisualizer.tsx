@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { CallState } from '../../types';
+import type { CallState } from '../../types';
 
 interface VoiceVisualizerProps {
   callState: CallState;
@@ -16,15 +16,15 @@ export const VoiceVisualizer: React.FC<VoiceVisualizerProps> = ({ callState }) =
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let width = (canvas.width = canvas.offsetWidth * window.devicePixelRatio);
-    let height = (canvas.height = canvas.offsetHeight * window.devicePixelRatio);
+    canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+    canvas.height = canvas.offsetHeight * window.devicePixelRatio;
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
     // Resize handler
     const handleResize = () => {
       if (!canvas) return;
-      width = canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-      height = canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+      canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+      canvas.height = canvas.offsetHeight * window.devicePixelRatio;
       ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
     };
     window.addEventListener('resize', handleResize);

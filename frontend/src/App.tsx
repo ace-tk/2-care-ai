@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useVoiceWebSocket } from './features/voice/hooks/useVoiceWebSocket';
 import { VoiceVisualizer } from './components/voice/VoiceVisualizer';
-import { Patient } from './types';
+import type { Patient } from './types';
 
 // Mock Clinician profile
 const CLINICIAN_NAME = "Dr. Sarah Jenkins, MD";

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ConnectionState, CallState, VoiceServerEvent } from '../../../types';
+import type { ConnectionState, CallState } from '../../../types';
 import { voiceWebSocketClient } from '../../../services/websocketClient';
 import { downsampleBuffer, floatTo16BitPCM } from '../../../utils/audio';
 
@@ -46,7 +46,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
 
   // Listen to WebSocket events from server
   useEffect(() => {
-    const handleStarted = (data: any) => {
+    const handleStarted = (_data: any) => {
       setCallState('listening');
       setError(null);
     };

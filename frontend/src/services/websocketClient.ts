@@ -1,4 +1,4 @@
-import { VoiceServerEvent } from '../types';
+import type { VoiceServerEvent } from '../types';
 
 type EventCallback<T = any> = (data: T) => void;
 
