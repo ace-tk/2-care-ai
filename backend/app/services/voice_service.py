@@ -148,6 +148,39 @@ class VoiceService:
             except Exception as e:
                 logger.error(f"Deepgram send error for session {session_id}: {e}")
 
+    async def process_chat_message(self, session_id: str, text: str):
+        """Processes an incoming text chat message, appending to history and generating an LLM response."""
+        state = self.active_sessions.get(session_id)
+        websocket = self.active_sockets.get(session_id)
+        
+        if not state or not websocket:
+            logger.error(f"Cannot process chat: Session {session_id} is inactive or missing socket.")
+            return
+            
+        # Append user message to state
+        state.chat_history.append({"sender": "user", "text": text})
+        
+        # Generate conversational response using OpenAI
+        try:
+            # We pass the new prompt and the history excluding the new prompt itself
+            ai_response = await self.llm.generate_response(prompt=text, history=state.chat_history[:-1])
+        except Exception as e:
+            logger.error(f"LLM generation failed: {e}")
+            ai_response = "I apologize, but I am currently unable to process your request."
+            
+        # Append AI response to state
+        state.chat_history.append({"sender": "ai", "text": ai_response})
+        
+        # Send back to client
+        try:
+            await websocket.send_json({
+                "event": "chat_response",
+                "session_id": session_id,
+                "payload": {"text": ai_response, "sender": "ai"}
+            })
+        except Exception as e:
+            logger.error(f"Failed to send chat response to {session_id}: {e}")
+
     async def finalize_session(self, session_id: str, db: AsyncSession) -> Transcript:
         """Ends streaming, generates SOAP clinical notes, and saves to database."""
         state = self.active_sessions.get(session_id)

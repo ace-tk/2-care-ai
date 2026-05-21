@@ -98,12 +98,8 @@ async def websocket_voice_endpoint(
                             
                         elif msg_type == "text":
                             user_text = payload.get("text", "")
-                            # Mock AI response to fulfill requirements without real AI integration
-                            await manager.send_personal_message({
-                                "event": "chat_response",
-                                "session_id": session_id,
-                                "payload": {"text": f"AI: {user_text}", "sender": "ai"}
-                            }, session_id)
+                            # Hand off to the orchestrator to manage state and generate LLM response
+                            await voice_service.process_chat_message(session_id, user_text)
                             
                         else:
                             await websocket.send_json({
