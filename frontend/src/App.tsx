@@ -50,6 +50,8 @@ export const App: React.FC = () => {
     stopCall,
     sendChatMessage,
     chatHistory,
+    isRecording,
+    chunkCount,
     error,
   } = useVoiceWebSocket();
 
@@ -181,7 +183,9 @@ export const App: React.FC = () => {
             <div className="status-badge">
               <span className={`status-indicator ${connectionState} ${callState}`}></span>
               <span>
-                {callState === 'listening'
+                {isRecording
+                  ? `🔴 RECORDING — ${chunkCount} chunks captured`
+                  : callState === 'listening'
                   ? `STREAMING AUDIO (${detectedLanguage.toUpperCase()})`
                   : callState === 'processing'
                   ? 'COMPILING SOAPS NOTES...'
@@ -190,6 +194,25 @@ export const App: React.FC = () => {
                   : 'READY FOR CONSULTATION'}
               </span>
             </div>
+
+            {/* Audio Capture Indicator */}
+            {isRecording && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.75rem',
+                padding: '0.5rem 1rem',
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                borderRadius: '8px',
+                fontSize: '0.8rem',
+                color: 'var(--accent-rose)',
+                marginTop: '0.5rem'
+              }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', animation: 'pulse 1.5s infinite' }}></span>
+                <span>Microphone active — streaming {chunkCount} PCM chunks @ 16kHz mono</span>
+              </div>
+            )}
 
             <h2 style={{ fontFamily: 'Outfit, sans-serif', fontSize: '1.75rem', fontWeight: 600, marginBottom: '0.5rem' }}>
               Consultation with {selectedPatient.first_name} {selectedPatient.last_name}

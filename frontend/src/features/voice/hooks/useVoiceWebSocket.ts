@@ -1,7 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+/**
+ * useVoiceWebSocket.ts
+ * ---------------------
+ * Orchestrator hook that composes:
+ *   - useAudioCapture  → microphone recording & PCM chunk delivery
+ *   - websocketClient  → bidirectional server communication
+ *
+ * This hook owns the high-level call lifecycle (idle → listening → processing → completed)
+ * and delegates audio capture entirely to the modular AudioService layer.
+ */
+
+import { useState, useEffect } from 'react';
 import type { ConnectionState, CallState } from '../../../types';
 import { voiceWebSocketClient } from '../../../services/websocketClient';
-import { downsampleBuffer, floatTo16BitPCM } from '../../../utils/audio';
+import { useAudioCapture } from './useAudioCapture';
 
 export interface UseVoiceWebSocketResult {
   connectionState: ConnectionState;
@@ -14,6 +25,10 @@ export interface UseVoiceWebSocketResult {
   stopCall: () => void;
   sendChatMessage: (text: string) => void;
   chatHistory: { sender: 'user' | 'ai'; text: string }[];
+  /** Audio capture state from the modular AudioService. */
+  isRecording: boolean;
+  /** Total PCM chunks captured in the current session. */
+  chunkCount: number;
   error: string | null;
 }
 
@@ -27,17 +42,28 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
   const [chatHistory, setChatHistory] = useState<{ sender: 'user' | 'ai'; text: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // Audio Context Ref variables
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  // Delegate all audio capture to the modular AudioService hook
+  const {
+    isRecording,
+    chunkCount,
+    startRecording,
+    stopRecording,
+    audioError,
+  } = useAudioCapture();
 
-  // Set up WebSocket status sync
+  // Surface audio errors in the main error state
+  useEffect(() => {
+    if (audioError) {
+      setError(audioError);
+    }
+  }, [audioError]);
+
+  // ---- WebSocket status sync ----
   useEffect(() => {
     const handleStatus = (status: any) => {
       setConnectionState(status);
       if (status === 'error') {
-        setError('WebSocket Connection error.');
+        setError('WebSocket connection error.');
       }
     };
 
@@ -47,7 +73,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     };
   }, []);
 
-  // Listen to WebSocket events from server
+  // ---- WebSocket event listeners ----
   useEffect(() => {
     const handleStarted = (_data: any) => {
       setCallState('listening');
@@ -89,6 +115,8 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     };
   }, []);
 
+  // ---- High-level call lifecycle ----
+
   const startCall = async (patientId: number, sourceLanguage = 'auto') => {
     try {
       setError(null);
@@ -98,54 +126,17 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       setChatHistory([]);
       setCallState('idle');
 
-      // Fetch JWT token from storage
+      // 1. Establish WebSocket connection
       const token = localStorage.getItem('token') || 'dummy-token-placeholder';
-
-      // 1. Establish WebSocket Connection
       await voiceWebSocketClient.connect(token);
 
-      // 2. Request user microphone permissions
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
+      // 2. Start microphone capture via AudioService
+      //    Each PCM chunk is streamed as a binary WebSocket frame
+      await startRecording((pcmChunk: ArrayBuffer) => {
+        voiceWebSocketClient.send(pcmChunk);
       });
-      mediaStreamRef.current = stream;
 
-      // 3. Setup AudioContext and script processor to record audio
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: 16000, // Request standard 16kHz directly if browser supports it
-      });
-      audioContextRef.current = audioContext;
-
-      const source = audioContext.createMediaStreamSource(stream);
-      
-      // Creating ScriptProcessorNode. Buffers size 4096 (standard for latency vs stability)
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-
-      // Process sound buffers in real-time
-      processor.onaudioprocess = (e) => {
-        if (voiceWebSocketClient) {
-          const float32Input = e.inputBuffer.getChannelData(0);
-          
-          // Downsample block to 16kHz if browser context opened at another rate
-          const downsampled = downsampleBuffer(float32Input, audioContext.sampleRate, 16000);
-          // Convert Float32Array to 16-bit PCM bytes (ArrayBuffer)
-          const pcmBytes = floatTo16BitPCM(downsampled);
-          
-          // Stream raw audio bytes to server via WebSocket binary frame
-          voiceWebSocketClient.send(pcmBytes);
-        }
-      };
-
-      // Connect nodes
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-
-      // 4. Send "start" control message over WebSocket
+      // 3. Send "start" control message to the server
       voiceWebSocketClient.send(
         JSON.stringify({
           type: 'start',
@@ -155,17 +146,16 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
           },
         })
       );
-      
     } catch (err: any) {
       console.error('Failed to start real-time call:', err);
       setError(err.message || 'Failed to initialize microphone or socket connection.');
-      cleanupAudio();
+      stopRecording();
       voiceWebSocketClient.disconnect();
     }
   };
 
   const stopCall = () => {
-    // 1. Send "stop" control command to generate summary
+    // 1. Send "stop" command to trigger server-side summary generation
     setCallState('processing');
     voiceWebSocketClient.send(
       JSON.stringify({
@@ -173,48 +163,29 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       })
     );
 
-    // 2. Tear down micro recording node immediately
-    cleanupAudio();
+    // 2. Stop microphone capture via AudioService
+    stopRecording();
   };
 
   const sendChatMessage = (text: string) => {
     if (!text.trim()) return;
-    
-    // Add user message to history
-    setChatHistory((prev) => [...prev, { sender: 'user', text }]);
-    
-    // Send over websocket
-    if (voiceWebSocketClient) {
-      voiceWebSocketClient.send(
-        JSON.stringify({
-          type: 'text',
-          payload: { text }
-        })
-      );
-    }
-  };
 
-  const cleanupAudio = () => {
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-    if (audioContextRef.current) {
-      if (audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close();
-      }
-      audioContextRef.current = null;
-    }
+    // Add user message to local history
+    setChatHistory((prev) => [...prev, { sender: 'user', text }]);
+
+    // Send over WebSocket
+    voiceWebSocketClient.send(
+      JSON.stringify({
+        type: 'text',
+        payload: { text },
+      })
+    );
   };
 
   // Auto clean-up on unmount
   useEffect(() => {
     return () => {
-      cleanupAudio();
+      stopRecording();
       voiceWebSocketClient.disconnect();
     };
   }, []);
@@ -230,6 +201,8 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     stopCall,
     sendChatMessage,
     chatHistory,
+    isRecording,
+    chunkCount,
     error,
   };
 }
