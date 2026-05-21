@@ -67,6 +67,7 @@ async def websocket_voice_endpoint(
                         
                         if msg_type == "start":
                             patient_id = payload.get("patient_id")
+                            source_language = payload.get("source_language", "en")
                             if not patient_id:
                                 await websocket.send_json({
                                     "event": "error",
@@ -78,7 +79,8 @@ async def websocket_voice_endpoint(
                             await voice_service.start_session(
                                 session_id=session_id,
                                 patient_id=int(patient_id),
-                                creator_id=creator_id
+                                creator_id=creator_id,
+                                source_language=source_language
                             )
                             await websocket.send_json({
                                 "event": "started",

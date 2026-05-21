@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from typing import Dict, Any, List
 from fastapi import WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,7 @@ class VoiceSessionState:
         self.translation_history: List[str] = []
         self.detected_languages: List[str] = []
         self.chat_history: List[Dict[str, str]] = []
+        self.dg_connection = None
 
 
 class VoiceService:
@@ -57,11 +59,54 @@ class VoiceService:
         logger.info(f"Unregistered session: {session_id}")
 
     async def start_session(
-        self, session_id: str, patient_id: int, creator_id: int
+        self, session_id: str, patient_id: int, creator_id: int, source_language: str = "en"
     ) -> VoiceSessionState:
-        """Initializes state for a new audio streaming session."""
+        """Initializes state for a new audio streaming session and connects to Deepgram STT."""
         state = VoiceSessionState(session_id, patient_id, creator_id)
         self.active_sessions[session_id] = state
+        
+        # Define STT callback
+        async def on_transcript(data: dict):
+            websocket = self.active_sockets.get(session_id)
+            if not websocket:
+                return
+                
+            transcript = data.get("transcript", "")
+            lang = data.get("language", "en")
+            
+            if transcript:
+                state.transcript_history.append(transcript)
+                if lang not in state.detected_languages:
+                    state.detected_languages.append(lang)
+                
+                # Broadcast real-time transcription to client
+                try:
+                    await websocket.send_json({
+                        "event": "transcript_diff",
+                        "session_id": session_id,
+                        "payload": {
+                            "original_text": transcript,
+                            "translated_text": transcript,  # Placeholder until translation is added
+                            "language": lang,
+                            "is_final": data.get("is_final", False)
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"Error broadcasting transcript for {session_id}: {e}")
+
+        # Connect to Deepgram
+        try:
+            # Map "auto" or empty to "en" for Deepgram options
+            lang_code = source_language if source_language and source_language != "auto" else "en"
+            dg_conn = await self.stt.create_streaming_session(
+                on_transcript=on_transcript,
+                sample_rate=settings.AUDIO_SAMPLE_RATE,
+                language=lang_code
+            )
+            state.dg_connection = dg_conn
+        except Exception as e:
+            logger.error(f"Failed to initialize STT for session {session_id}: {e}")
+            
         logger.info(f"Started voice session state for {session_id} (Patient: {patient_id})")
         return state
 
@@ -71,7 +116,6 @@ class VoiceService:
         1. Accumulates binary audio.
         2. Logs chunk metrics and transmission timing.
         """
-        import time
         state = self.active_sessions.get(session_id)
         websocket = self.active_sockets.get(session_id)
         
@@ -90,13 +134,19 @@ class VoiceService:
         logger.info(
             f"[AUDIO_PIPELINE] Session {session_id[:8]} | "
             f"Chunk Size: {chunk_size:4d} bytes | "
-            f"Queue/Processing Latency: {timing_ms:.2f} ms | "
+            f"Queue Latency: {timing_ms:.2f} ms | "
             f"Total Chunks: {len(state.audio_chunks)}"
         )
 
-        # Skip STT for now as requested by user ("Do not implement transcription yet.")
-        # We will keep the architecture ready for when STT is integrated.
-        pass
+        # 3. Stream to Deepgram STT
+        if state.dg_connection:
+            stt_start_time = time.time()
+            try:
+                await state.dg_connection.send(chunk)
+                stt_latency = (time.time() - stt_start_time) * 1000
+                logger.debug(f"[STT_STREAM] Sent chunk to Deepgram (Send Latency: {stt_latency:.2f} ms)")
+            except Exception as e:
+                logger.error(f"Deepgram send error for session {session_id}: {e}")
 
     async def finalize_session(self, session_id: str, db: AsyncSession) -> Transcript:
         """Ends streaming, generates SOAP clinical notes, and saves to database."""
@@ -107,6 +157,13 @@ class VoiceService:
             raise ValueError(f"Session {session_id} not found.")
 
         logger.info(f"Finalizing session: {session_id}. Compiling documentation...")
+
+        # 1. Stop Deepgram streaming
+        if state.dg_connection:
+            try:
+                await state.dg_connection.finish()
+            except Exception as e:
+                logger.error(f"Error finishing Deepgram stream: {e}")
 
         # 1. Get full conversations
         full_original = " ".join(state.transcript_history)
