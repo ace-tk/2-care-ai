@@ -22,6 +22,7 @@ class VoiceSessionState:
         self.session_id = session_id
         self.patient_id = patient_id
         self.creator_id = creator_id
+        self.session_language = "en"
         self.is_active = True
         self.audio_chunks: List[bytes] = []
         self.transcript_history: List[str] = []
@@ -63,6 +64,7 @@ class VoiceService:
     ) -> VoiceSessionState:
         """Initializes state for a new audio streaming session and connects to Deepgram STT."""
         state = VoiceSessionState(session_id, patient_id, creator_id)
+        state.session_language = source_language
         self.active_sessions[session_id] = state
         
         # Define STT callback
@@ -76,8 +78,24 @@ class VoiceService:
             
             if transcript:
                 state.transcript_history.append(transcript)
+                
+                # If language is auto or not detected yet, try to detect from text
+                if state.session_language == "auto" and data.get("is_final", False):
+                    detected = await self.llm.detect_language(transcript)
+                    if detected:
+                        state.session_language = detected
+                        lang = detected
+                else:
+                    lang = state.session_language if state.session_language != "auto" else "en"
+                    
                 if lang not in state.detected_languages:
                     state.detected_languages.append(lang)
+                    
+                # Translate to English for internal system processing
+                translated = transcript
+                if lang != "en" and data.get("is_final", False):
+                    translated = await self.llm.translate_text(transcript, source_language=lang, target_language="en")
+                    state.translation_history.append(translated)
                 
                 # Broadcast real-time transcription to client
                 try:
@@ -86,7 +104,7 @@ class VoiceService:
                         "session_id": session_id,
                         "payload": {
                             "original_text": transcript,
-                            "translated_text": transcript,  # Placeholder until translation is added
+                            "translated_text": translated,
                             "language": lang,
                             "is_final": data.get("is_final", False)
                         }
@@ -160,10 +178,18 @@ class VoiceService:
         # Append user message to state
         state.chat_history.append({"sender": "user", "text": text})
         
-        # Generate conversational response using OpenAI
+        # Detect language if auto
+        if state.session_language == "auto":
+            state.session_language = await self.llm.detect_language(text)
+            
+        # Generate conversational response using OpenAI Orchestrator
         try:
             # We pass the new prompt and the history excluding the new prompt itself
-            ai_response = await self.llm.generate_response(prompt=text, history=state.chat_history[:-1])
+            ai_response = await self.llm.generate_response(
+                prompt=text, 
+                history=state.chat_history[:-1],
+                language=state.session_language
+            )
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             ai_response = "I apologize, but I am currently unable to process your request."

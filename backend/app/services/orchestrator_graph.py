@@ -26,14 +26,18 @@ class GraphState(TypedDict):
     intent: str
     active_agent: str
     patient_context: dict
+    language: str
 
 # ----------------- Agent Nodes -----------------
 async def router_node(state: GraphState, llm: ChatOpenAI) -> dict:
     """Analyzes the conversation history and determines the intent."""
     logger.debug("Executing router_node")
     
+    language = state.get("language", "en")
+    
     prompt = (
         "You are a healthcare routing assistant. Analyze the conversation history and determine the user's intent. "
+        f"The user prefers language code: '{language}'. "
         "Respond ONLY with one of these exact words: 'booking', 'cancellation', 'rescheduling', 'conflict', or 'general'."
     )
     
@@ -67,7 +71,10 @@ async def router_node(state: GraphState, llm: ChatOpenAI) -> dict:
 
 
 async def _run_agent(state: GraphState, llm: ChatOpenAI, system_prompt: str) -> dict:
-    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    language = state.get("language", "en")
+    full_prompt = system_prompt + f"\n\nIMPORTANT: The user prefers language code '{language}'. You MUST respond entirely in the '{language}' language."
+    
+    messages = [SystemMessage(content=full_prompt)] + state["messages"]
     response = await llm.ainvoke(messages)
     
     if not hasattr(response, "tool_calls") or not response.tool_calls:

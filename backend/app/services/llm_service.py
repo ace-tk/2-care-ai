@@ -47,7 +47,7 @@ class LLMService:
         return messages
 
     async def generate_response(
-        self, prompt: str, history: List[Dict[str, str]]
+        self, prompt: str, history: List[Dict[str, str]], language: str = "en"
     ) -> str:
         """Generates a conversational response using the LangGraph orchestrator."""
         logger.debug(f"Generating LangGraph response for prompt: '{prompt[:30]}...'")
@@ -69,7 +69,8 @@ class LLMService:
         initial_state = {
             "messages": lc_messages,
             "intent": "",
-            "patient_context": {}
+            "patient_context": {},
+            "language": language
         }
         
         try:
@@ -106,6 +107,25 @@ class LLMService:
         except Exception as e:
             logger.error(f"Error streaming OpenAI response: {e}")
             yield "I apologize, but I am having trouble connecting right now."
+
+    async def detect_language(self, text: str) -> str:
+        """Detects the language of the provided text. Returns code (e.g., 'en', 'hi', 'ta')."""
+        logger.debug(f"Detecting language for text: '{text[:30]}...'")
+        prompt = (
+            "Detect the language of the following text. "
+            "Respond ONLY with the ISO 639-1 language code (e.g., 'en', 'hi', 'ta').\n\n"
+            f"Text: {text}"
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+            )
+            return response.choices[0].message.content.strip().lower() or "en"
+        except Exception as e:
+            logger.error(f"Error detecting language: {e}")
+            return "en"
 
     async def translate_text(
         self, text: str, source_language: str, target_language: str = "en"
