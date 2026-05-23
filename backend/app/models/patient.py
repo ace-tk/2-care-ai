@@ -15,7 +15,12 @@ class Patient(Base):
     language_preference: Mapped[str] = mapped_column(String(10), default="en")  # en, es, fr, zh, etc.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-    # Relationship to audio transcripts of consultations
+    # Relationships to audio transcripts of consultations
     transcripts: Mapped[list["Transcript"]] = relationship(
         "Transcript", back_populates="patient", cascade="all, delete-orphan"
+    )
+
+    # Relationship to appointments
+    appointments: Mapped[list["Appointment"]] = relationship(
+        "Appointment", back_populates="patient", cascade="all, delete-orphan"
     )
