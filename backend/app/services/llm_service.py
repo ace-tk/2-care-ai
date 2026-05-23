@@ -47,35 +47,26 @@ class LLMService:
         return messages
 
     async def generate_response(
-        self, prompt: str, history: List[Dict[str, str]], language: str = "en"
+        self, prompt: str, session_id: str, history: List[Dict[str, str]] = None, language: str = "en"
     ) -> str:
-        """Generates a conversational response using the LangGraph orchestrator."""
+        """Generates a conversational response using the LangGraph orchestrator's stateful memory."""
         logger.debug(f"Generating LangGraph response for prompt: '{prompt[:30]}...'")
         
-        # Convert history into LangChain messages
-        from langchain_core.messages import HumanMessage, AIMessage
-        lc_messages = []
-        for msg in history:
-            role = msg.get("sender", "user")
-            text = msg.get("text", "")
-            if role == "ai" or role == "assistant":
-                lc_messages.append(AIMessage(content=text))
-            else:
-                lc_messages.append(HumanMessage(content=text))
-                
-        if prompt:
-            lc_messages.append(HumanMessage(content=prompt))
+        from langchain_core.messages import HumanMessage
+        
+        # We only pass the new prompt; the GraphState MemorySaver handles history automatically based on session_id.
+        lc_messages = [HumanMessage(content=prompt)] if prompt else []
             
         initial_state = {
             "messages": lc_messages,
-            "intent": "",
-            "patient_context": {},
             "language": language
         }
         
+        config = {"configurable": {"thread_id": session_id}}
+        
         try:
-            # Run the graph
-            final_state = await self.orchestrator.ainvoke(initial_state)
+            # Run the graph using thread_id for session persistence
+            final_state = await self.orchestrator.ainvoke(initial_state, config=config)
             
             # The last message in final_state["messages"] should be the AI response
             if final_state and "messages" in final_state and len(final_state["messages"]) > 0:

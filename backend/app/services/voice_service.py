@@ -187,6 +187,7 @@ class VoiceService:
             # We pass the new prompt and the history excluding the new prompt itself
             ai_response = await self.llm.generate_response(
                 prompt=text, 
+                session_id=session_id,
                 history=state.chat_history[:-1],
                 language=state.session_language
             )

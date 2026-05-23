@@ -4,6 +4,7 @@ from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, AnyMessage, ToolMessage
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 from backend.app.tools import (
     check_availability_tool,
     book_appointment_tool,
@@ -27,6 +28,8 @@ class GraphState(TypedDict):
     active_agent: str
     patient_context: dict
     language: str
+    booking_flow: dict
+    pending_confirmation: str
 
 # ----------------- Agent Nodes -----------------
 async def router_node(state: GraphState, llm: ChatOpenAI) -> dict:
@@ -233,4 +236,5 @@ def build_orchestrator_graph(api_key: str):
         }
     )
 
-    return workflow.compile()
+    memory = MemorySaver()
+    return workflow.compile(checkpointer=memory)
