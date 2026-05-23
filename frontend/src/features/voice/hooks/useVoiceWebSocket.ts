@@ -25,6 +25,7 @@ export interface UseVoiceWebSocketResult {
   stopCall: () => void;
   sendChatMessage: (text: string) => void;
   chatHistory: { sender: 'user' | 'ai'; text: string }[];
+  reasoningTraces: any[];
   /** Audio capture state from the modular AudioService. */
   isRecording: boolean;
   /** Total PCM chunks captured in the current session. */
@@ -40,6 +41,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
   const [detectedLanguage, setDetectedLanguage] = useState('en');
   const [clinicalSummary, setClinicalSummary] = useState('');
   const [chatHistory, setChatHistory] = useState<{ sender: 'user' | 'ai'; text: string }[]>([]);
+  const [reasoningTraces, setReasoningTraces] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   
   // Audio playback queue for sequential TTS chunk playback
@@ -130,6 +132,10 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
         playNextAudio();
       }
     };
+    
+    const handleReasoningTrace = (data: any) => {
+      setReasoningTraces((prev) => [...prev, data.payload]);
+    };
 
     voiceWebSocketClient.on('started', handleStarted);
     voiceWebSocketClient.on('transcript_diff', handleTranscriptDiff);
@@ -137,6 +143,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     voiceWebSocketClient.on('error', handleServerError);
     voiceWebSocketClient.on('chat_response', handleChatResponse);
     voiceWebSocketClient.on('audio_stream', handleAudioStream);
+    voiceWebSocketClient.on('reasoning_trace', handleReasoningTrace);
 
     return () => {
       voiceWebSocketClient.off('started', handleStarted);
@@ -145,6 +152,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       voiceWebSocketClient.off('error', handleServerError);
       voiceWebSocketClient.off('chat_response', handleChatResponse);
       voiceWebSocketClient.off('audio_stream', handleAudioStream);
+      voiceWebSocketClient.off('reasoning_trace', handleReasoningTrace);
     };
   }, []);
 
@@ -157,6 +165,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       setTranslatedText('');
       setClinicalSummary('');
       setChatHistory([]);
+      setReasoningTraces([]);
       setCallState('idle');
 
       // 1. Establish WebSocket connection
@@ -234,6 +243,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     stopCall,
     sendChatMessage,
     chatHistory,
+    reasoningTraces,
     isRecording,
     chunkCount,
     error,

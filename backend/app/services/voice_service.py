@@ -183,6 +183,17 @@ class VoiceService:
         if state.session_language == "auto":
             state.session_language = await self.llm.detect_language(text)
             
+        # Define real-time trace callback
+        async def on_trace(trace_event: dict):
+            try:
+                await websocket.send_json({
+                    "event": "reasoning_trace",
+                    "session_id": session_id,
+                    "payload": trace_event
+                })
+            except Exception as e:
+                logger.error(f"Failed to send trace event to {session_id}: {e}")
+
         # Generate conversational response using OpenAI Orchestrator
         try:
             # We pass the new prompt and the history excluding the new prompt itself
@@ -190,7 +201,8 @@ class VoiceService:
                 prompt=text, 
                 session_id=session_id,
                 history=state.chat_history[:-1],
-                language=state.session_language
+                language=state.session_language,
+                trace_callback=on_trace
             )
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")

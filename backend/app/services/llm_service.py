@@ -47,7 +47,7 @@ class LLMService:
         return messages
 
     async def generate_response(
-        self, prompt: str, session_id: str, history: List[Dict[str, str]] = None, language: str = "en"
+        self, prompt: str, session_id: str, history: List[Dict[str, str]] = None, language: str = "en", trace_callback = None
     ) -> str:
         """Generates a conversational response using the LangGraph orchestrator's stateful memory."""
         logger.debug(f"Generating LangGraph response for prompt: '{prompt[:30]}...'")
@@ -64,14 +64,50 @@ class LLMService:
         
         config = {"configurable": {"thread_id": session_id}}
         
+        import time
+        start_time = time.time()
+        final_state = None
+        
         try:
-            # Run the graph using thread_id for session persistence
-            final_state = await self.orchestrator.ainvoke(initial_state, config=config)
+            # Run the graph using stream_mode="updates" for real-time observability
+            async for chunk in self.orchestrator.astream(initial_state, config=config, stream_mode="updates"):
+                final_state = chunk
+                
+                if trace_callback:
+                    for node_name, state_update in chunk.items():
+                        trace_event = {
+                            "node": node_name,
+                            "timestamp": time.time(),
+                        }
+                        
+                        if "intent" in state_update:
+                            trace_event["intent"] = state_update["intent"]
+                        if "active_agent" in state_update:
+                            trace_event["active_agent"] = state_update["active_agent"]
+                            
+                        # Extract Tool Usage
+                        if "messages" in state_update and len(state_update["messages"]) > 0:
+                            msg = state_update["messages"][-1]
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                trace_event["tool_calls"] = [{"name": tc["name"], "args": tc["args"]} for tc in msg.tool_calls]
+                            elif getattr(msg, "type", "") == "tool":
+                                trace_event["tool_result"] = getattr(msg, "content", "")
+                                trace_event["tool_name"] = getattr(msg, "name", "")
+                                
+                        await trace_callback(trace_event)
             
-            # The last message in final_state["messages"] should be the AI response
-            if final_state and "messages" in final_state and len(final_state["messages"]) > 0:
-                last_message = final_state["messages"][-1]
-                return last_message.content or ""
+            latency = (time.time() - start_time) * 1000
+            if trace_callback:
+                await trace_callback({"node": "end", "latency_ms": latency})
+                
+            # The last node output should contain the final AI message
+            if final_state:
+                last_node = list(final_state.keys())[0]
+                state_data = final_state[last_node]
+                if "messages" in state_data and len(state_data["messages"]) > 0:
+                    last_message = state_data["messages"][-1]
+                    return getattr(last_message, "content", "") or ""
+                    
             return "No response generated."
         except Exception as e:
             logger.error(f"Error executing LangGraph orchestrator: {e}", exc_info=True)

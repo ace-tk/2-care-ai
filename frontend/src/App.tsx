@@ -50,6 +50,7 @@ export const App: React.FC = () => {
     stopCall,
     sendChatMessage,
     chatHistory,
+    reasoningTraces,
     isRecording,
     chunkCount,
     error,
@@ -397,10 +398,29 @@ export const App: React.FC = () => {
                 borderRadius: '8px',
                 fontFamily: 'monospace',
                 fontSize: '0.85rem',
-                color: 'var(--text-secondary)'
+                color: 'var(--text-secondary)',
+                maxHeight: '300px',
+                overflowY: 'auto'
               }}
             >
-              {callState === 'processing' ? (
+              {reasoningTraces.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {reasoningTraces.map((trace, idx) => (
+                    <div key={idx} style={{ paddingBottom: '0.5rem', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <div style={{ color: 'var(--accent-indigo)', fontWeight: 'bold' }}>
+                        &gt; [{trace.timestamp ? new Date(trace.timestamp * 1000).toLocaleTimeString() : 'Sys'}] NODE: {trace.node.toUpperCase()}
+                      </div>
+                      {trace.intent && <div style={{ color: 'var(--accent-emerald)', paddingLeft: '1rem' }}>Intent: {trace.intent}</div>}
+                      {trace.active_agent && <div style={{ color: 'var(--text-primary)', paddingLeft: '1rem' }}>Routing to: {trace.active_agent}</div>}
+                      {trace.tool_calls && trace.tool_calls.map((tc: any, i: number) => (
+                        <div key={i} style={{ color: 'var(--accent-rose)', paddingLeft: '1rem' }}>Executing Tool: {tc.name}({JSON.stringify(tc.args)})</div>
+                      ))}
+                      {trace.tool_result && <div style={{ color: 'var(--secondary)', paddingLeft: '1rem' }}>Tool Result: {trace.tool_result}</div>}
+                      {trace.latency_ms && <div style={{ color: 'var(--text-muted)', paddingLeft: '1rem' }}>Latency: {trace.latency_ms.toFixed(2)}ms</div>}
+                    </div>
+                  ))}
+                </div>
+              ) : callState === 'processing' ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                   <span style={{ color: 'var(--accent-indigo)' }}>&gt; Analyzing patient transcript for clinical entities...</span>
                   <span style={{ color: 'var(--accent-indigo)', opacity: 0.8 }}>&gt; Cross-referencing ICD-10 codes with reported symptoms...</span>
