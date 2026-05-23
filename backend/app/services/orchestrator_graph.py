@@ -2,10 +2,19 @@ import logging
 from typing import Annotated, TypedDict, Literal
 from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, AnyMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, AnyMessage, ToolMessage
 from langgraph.graph.message import add_messages
+from backend.app.tools import (
+    check_availability_tool,
+    book_appointment_tool,
+    cancel_appointment_tool,
+    reschedule_appointment_tool,
+)
 
 logger = logging.getLogger(__name__)
+
+tools_list = [check_availability_tool, book_appointment_tool, cancel_appointment_tool, reschedule_appointment_tool]
+tools_map = {t.name: t for t in tools_list}
 
 # ----------------- State Definition -----------------
 class GraphState(TypedDict):
@@ -15,6 +24,7 @@ class GraphState(TypedDict):
     """
     messages: Annotated[list[AnyMessage], add_messages]
     intent: str
+    active_agent: str
     patient_context: dict
 
 # ----------------- Agent Nodes -----------------
@@ -27,9 +37,7 @@ async def router_node(state: GraphState, llm: ChatOpenAI) -> dict:
         "Respond ONLY with one of these exact words: 'booking', 'cancellation', 'rescheduling', 'conflict', or 'general'."
     )
     
-    # We look at the last message to decide routing
     last_user_message = state["messages"][-1].content if state["messages"] else ""
-    
     messages = [
         SystemMessage(content=prompt),
         HumanMessage(content=f"User says: {last_user_message}")
@@ -38,118 +46,146 @@ async def router_node(state: GraphState, llm: ChatOpenAI) -> dict:
     response = await llm.ainvoke(messages)
     intent = response.content.strip().lower()
     
-    # Fallback validation
     valid_intents = ["booking", "cancellation", "rescheduling", "conflict", "general"]
     if intent not in valid_intents:
         intent = "general"
         
-    return {"intent": intent}
+    logger.info(f"Trace: Detected intent: {intent}")
+    
+    active_agent_map = {
+        "booking": "booking_agent",
+        "cancellation": "cancellation_agent",
+        "rescheduling": "rescheduling_agent",
+        "conflict": "conflict_handler",
+        "general": "general_assistant"
+    }
+        
+    return {
+        "intent": intent, 
+        "active_agent": active_agent_map.get(intent, "general_assistant")
+    }
+
+
+async def _run_agent(state: GraphState, llm: ChatOpenAI, system_prompt: str) -> dict:
+    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    response = await llm.ainvoke(messages)
+    
+    if not hasattr(response, "tool_calls") or not response.tool_calls:
+        logger.info(f"Trace: Generated response: {response.content}")
+        
+    return {"messages": [response]}
 
 
 async def booking_agent_node(state: GraphState, llm: ChatOpenAI) -> dict:
-    """Handles appointment booking logic."""
     logger.debug("Executing booking_agent_node")
-    sys_msg = SystemMessage(
-        content=(
-            "You are a healthcare appointment booking specialist. "
-            "Help the user book an appointment. Ask for preferred dates and times. "
-            "Do not execute real tools yet, just converse as if you are setting up the booking."
-        )
+    prompt = (
+        "You are a healthcare appointment booking specialist. "
+        "Help the user book an appointment. Ask for preferred dates and times. "
+        "Use your tools to check availability and book appointments when you have the necessary information."
     )
-    messages = [sys_msg] + state["messages"]
-    response = await llm.ainvoke(messages)
-    return {"messages": [response]}
+    return await _run_agent(state, llm, prompt)
 
 
 async def cancellation_agent_node(state: GraphState, llm: ChatOpenAI) -> dict:
-    """Handles appointment cancellation logic."""
     logger.debug("Executing cancellation_agent_node")
-    sys_msg = SystemMessage(
-        content=(
-            "You are a healthcare appointment cancellation specialist. "
-            "Help the user cancel their appointment. Ask for confirmation before pretending to cancel. "
-            "Do not execute real tools yet."
-        )
+    prompt = (
+        "You are a healthcare appointment cancellation specialist. "
+        "Help the user cancel their appointment. Ask for confirmation before cancelling. "
+        "Use your tools to cancel the appointment when confirmed."
     )
-    messages = [sys_msg] + state["messages"]
-    response = await llm.ainvoke(messages)
-    return {"messages": [response]}
+    return await _run_agent(state, llm, prompt)
 
 
 async def rescheduling_agent_node(state: GraphState, llm: ChatOpenAI) -> dict:
-    """Handles appointment rescheduling logic."""
     logger.debug("Executing rescheduling_agent_node")
-    sys_msg = SystemMessage(
-        content=(
-            "You are a healthcare appointment rescheduling specialist. "
-            "Help the user reschedule their appointment by asking for a new preferred time. "
-            "Do not execute real tools yet."
-        )
+    prompt = (
+        "You are a healthcare appointment rescheduling specialist. "
+        "Help the user reschedule their appointment by asking for a new preferred time. "
+        "Use your tools to check availability and reschedule when you have the information."
     )
-    messages = [sys_msg] + state["messages"]
-    response = await llm.ainvoke(messages)
-    return {"messages": [response]}
+    return await _run_agent(state, llm, prompt)
 
 
 async def conflict_handler_node(state: GraphState, llm: ChatOpenAI) -> dict:
-    """Handles schedule conflicts or overlapping appointments."""
     logger.debug("Executing conflict_handler_node")
-    sys_msg = SystemMessage(
-        content=(
-            "You are a scheduling conflict resolution specialist. "
-            "Explain to the user that their requested time conflicts with an existing appointment "
-            "or provider unavailability, and offer alternatives."
-        )
+    prompt = (
+        "You are a scheduling conflict resolution specialist. "
+        "Explain to the user that their requested time conflicts with an existing appointment "
+        "or provider unavailability, and offer alternatives. Use tools to find alternative slots."
     )
-    messages = [sys_msg] + state["messages"]
-    response = await llm.ainvoke(messages)
-    return {"messages": [response]}
+    return await _run_agent(state, llm, prompt)
 
 
 async def general_assistant_node(state: GraphState, llm: ChatOpenAI) -> dict:
-    """Fallback for general inquiries not matching specific intents."""
     logger.debug("Executing general_assistant_node")
-    sys_msg = SystemMessage(
-        content=(
-            "You are a professional healthcare assistant. "
-            "Answer general questions politely. If they ask for medical advice, tell them you cannot provide it and they must consult a doctor."
-        )
+    prompt = (
+        "You are a professional healthcare assistant. "
+        "Answer general questions politely. If they ask for medical advice, tell them you cannot provide it and they must consult a doctor."
     )
-    messages = [sys_msg] + state["messages"]
-    response = llm.invoke(messages)
-    return {"messages": [response]}
+    return await _run_agent(state, llm, prompt)
+
+
+async def tool_node(state: GraphState) -> dict:
+    """Executes tools triggered by agents and returns structured ToolMessages."""
+    last_message = state["messages"][-1]
+    responses = []
+    
+    for tool_call in getattr(last_message, "tool_calls", []):
+        tool_name = tool_call["name"]
+        args = tool_call["args"]
+        logger.info(f"Trace: Selected tool '{tool_name}' with args: {args}")
+        
+        tool = tools_map.get(tool_name)
+        if tool:
+            try:
+                output = await tool.ainvoke(args)
+                logger.info(f"Trace: Tool '{tool_name}' output: {output}")
+            except Exception as e:
+                output = f"Error: {str(e)}"
+                logger.error(f"Trace: Tool '{tool_name}' failed: {output}")
+        else:
+            output = f"Error: Tool '{tool_name}' not found."
+            logger.error(f"Trace: Tool '{tool_name}' not found.")
+            
+        responses.append(ToolMessage(content=str(output), name=tool_name, tool_call_id=tool_call["id"]))
+        
+    return {"messages": responses}
+
 
 # ----------------- Routing Logic -----------------
 def route_intent(state: GraphState) -> str:
     """Conditional edge router based on the intent string in state."""
-    intent = state.get("intent", "general")
-    if intent == "booking":
-        return "booking_agent"
-    elif intent == "cancellation":
-        return "cancellation_agent"
-    elif intent == "rescheduling":
-        return "rescheduling_agent"
-    elif intent == "conflict":
-        return "conflict_handler"
-    else:
-        return "general_assistant"
+    return state.get("active_agent", "general_assistant")
+
+def route_agent(state: GraphState) -> str:
+    """Check if the last agent message requires a tool call."""
+    last_message = state["messages"][-1]
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    return END
+
+def route_tools(state: GraphState) -> str:
+    """Return to the active agent after tool execution."""
+    return state.get("active_agent", "general_assistant")
 
 # ----------------- Graph Construction -----------------
 def build_orchestrator_graph(api_key: str):
     """Builds and returns the compiled LangGraph."""
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=api_key)
+    llm_with_tools = llm.bind_tools(tools_list)
 
     workflow = StateGraph(GraphState)
 
-    # Add nodes - partial application of the LLM to keep nodes functional
-    workflow.add_node("router", lambda state: router_node(state, llm))
-    workflow.add_node("booking_agent", lambda state: booking_agent_node(state, llm))
-    workflow.add_node("cancellation_agent", lambda state: cancellation_agent_node(state, llm))
-    workflow.add_node("rescheduling_agent", lambda state: rescheduling_agent_node(state, llm))
-    workflow.add_node("conflict_handler", lambda state: conflict_handler_node(state, llm))
-    workflow.add_node("general_assistant", lambda state: general_assistant_node(state, llm))
+    # Add nodes
+    workflow.add_node("router", lambda state: router_node(state, llm)) # Router doesn't need tools
+    workflow.add_node("booking_agent", lambda state: booking_agent_node(state, llm_with_tools))
+    workflow.add_node("cancellation_agent", lambda state: cancellation_agent_node(state, llm_with_tools))
+    workflow.add_node("rescheduling_agent", lambda state: rescheduling_agent_node(state, llm_with_tools))
+    workflow.add_node("conflict_handler", lambda state: conflict_handler_node(state, llm_with_tools))
+    workflow.add_node("general_assistant", lambda state: general_assistant_node(state, llm_with_tools))
+    workflow.add_node("tools", tool_node)
 
-    # Add edges
+    # Entry point
     workflow.add_edge(START, "router")
     
     # Conditional routing from the router node
@@ -165,11 +201,29 @@ def build_orchestrator_graph(api_key: str):
         }
     )
 
-    # All specialized agents lead to END
-    workflow.add_edge("booking_agent", END)
-    workflow.add_edge("cancellation_agent", END)
-    workflow.add_edge("rescheduling_agent", END)
-    workflow.add_edge("conflict_handler", END)
-    workflow.add_edge("general_assistant", END)
+    # From each agent, route either to tools or to END
+    agents = ["booking_agent", "cancellation_agent", "rescheduling_agent", "conflict_handler", "general_assistant"]
+    for agent in agents:
+        workflow.add_conditional_edges(
+            agent,
+            route_agent,
+            {
+                "tools": "tools",
+                END: END
+            }
+        )
+
+    # From tools, route back to the active agent to interpret tool results
+    workflow.add_conditional_edges(
+        "tools",
+        route_tools,
+        {
+            "booking_agent": "booking_agent",
+            "cancellation_agent": "cancellation_agent",
+            "rescheduling_agent": "rescheduling_agent",
+            "conflict_handler": "conflict_handler",
+            "general_assistant": "general_assistant"
+        }
+    )
 
     return workflow.compile()
