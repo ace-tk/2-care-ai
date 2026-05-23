@@ -8,6 +8,7 @@ from backend.app.core.config import settings
 from backend.app.core.logging import setup_logging
 from backend.app.api.v1.router import api_router
 from backend.app.core.database import Base, engine
+from backend.app.services.campaign_service import campaign_service
 
 # Set up system-wide logger
 setup_logging()
@@ -30,9 +31,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to auto-create database tables: {e}")
             
+    # Start background workers
+    await campaign_service.start_worker()
+            
     yield
     
     logger.info("Shutting down and cleaning up resources...")
+    await campaign_service.stop_worker()
     await engine.dispose()
 
 
