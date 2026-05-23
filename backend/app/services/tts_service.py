@@ -1,4 +1,9 @@
 import logging
+import time
+import json
+import base64
+import websockets
+import asyncio
 from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -28,7 +33,7 @@ class TTSService:
         return b""
 
     async def stream_speech(
-        self, text_stream: AsyncGenerator[str, None], voice_id: str = "default"
+        self, text_stream: AsyncGenerator[str, None], voice_id: str = "cjVigY5qzO86HufA2TX8"  # Default Rachel voice
     ) -> AsyncGenerator[bytes, None]:
         """Converts an incoming stream of text into an outgoing stream of audio chunks.
         
@@ -36,8 +41,53 @@ class TTSService:
         """
         logger.info("Starting real-time text-to-speech audio stream...")
         
-        async for text_chunk in text_stream:
-            # Process text_chunk and generate audio bytes
-            # In production: send to ElevenLabs WebSockets and receive audio chunks
-            logger.debug(f"Streaming TTS for chunk: '{text_chunk}'")
-            yield b"\x00" * 512  # Dummy silence bytes placeholder
+        # Use eleven_multilingual_v2 for English, Hindi, and Tamil support
+        ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_multilingual_v2&output_format=mp3_44100_128"
+        
+        headers = {
+            "xi-api-key": self.api_key
+        }
+        
+        start_time = time.time()
+        first_chunk_time = None
+        
+        try:
+            async with websockets.connect(ws_url, additional_headers=headers) as ws:
+                
+                async def sender():
+                    async for chunk in text_stream:
+                        if chunk.strip():
+                            payload = {"text": chunk + " ", "try_trigger_generation": True}
+                            await ws.send(json.dumps(payload))
+                    
+                    # Send empty text to indicate end of stream
+                    await ws.send(json.dumps({"text": ""}))
+                
+                sender_task = asyncio.create_task(sender())
+                
+                while True:
+                    try:
+                        message = await ws.recv()
+                        data = json.loads(message)
+                        
+                        if data.get("audio"):
+                            if not first_chunk_time:
+                                first_chunk_time = time.time()
+                                latency = (first_chunk_time - start_time) * 1000
+                                logger.info(f"TTS Time-To-First-Byte (TTFB): {latency:.2f} ms")
+                                
+                            audio_bytes = base64.b64decode(data["audio"])
+                            yield audio_bytes
+                            
+                        if data.get("isFinal"):
+                            logger.info("ElevenLabs stream completed.")
+                            break
+                            
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("ElevenLabs connection closed early.")
+                        break
+                        
+                await sender_task
+                
+        except Exception as e:
+            logger.error(f"Error in ElevenLabs TTS stream: {e}", exc_info=True)

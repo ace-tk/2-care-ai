@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import time
+import base64
 from typing import Dict, Any, List
 from fastapi import WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -207,6 +208,28 @@ class VoiceService:
             })
         except Exception as e:
             logger.error(f"Failed to send chat response to {session_id}: {e}")
+            
+        # Stream TTS audio
+        async def text_iterator():
+            # Yield chunks to simulate stream or pass directly
+            words = ai_response.split(" ")
+            for i in range(0, len(words), 5):
+                chunk = " ".join(words[i:i+5]) + " "
+                yield chunk
+                await asyncio.sleep(0.01)
+                
+        try:
+            async for audio_chunk in self.tts.stream_speech(text_iterator()):
+                b64_audio = base64.b64encode(audio_chunk).decode('utf-8')
+                await websocket.send_json({
+                    "event": "audio_stream",
+                    "session_id": session_id,
+                    "payload": {
+                        "audio_data": b64_audio
+                    }
+                })
+        except Exception as e:
+            logger.error(f"Error streaming TTS audio to client: {e}")
 
     async def finalize_session(self, session_id: str, db: AsyncSession) -> Transcript:
         """Ends streaming, generates SOAP clinical notes, and saves to database."""

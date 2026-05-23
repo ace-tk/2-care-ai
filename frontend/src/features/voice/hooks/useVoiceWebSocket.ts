@@ -9,7 +9,7 @@
  * and delegates audio capture entirely to the modular AudioService layer.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { ConnectionState, CallState } from '../../../types';
 import { voiceWebSocketClient } from '../../../services/websocketClient';
 import { useAudioCapture } from './useAudioCapture';
@@ -41,6 +41,10 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
   const [clinicalSummary, setClinicalSummary] = useState('');
   const [chatHistory, setChatHistory] = useState<{ sender: 'user' | 'ai'; text: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
+  
+  // Audio playback queue for sequential TTS chunk playback
+  const audioQueueRef = useRef<HTMLAudioElement[]>([]);
+  const isPlayingRef = useRef<boolean>(false);
 
   // Delegate all audio capture to the modular AudioService hook
   const {
@@ -99,12 +103,40 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
     const handleChatResponse = (data: any) => {
       setChatHistory((prev) => [...prev, { sender: 'ai', text: data.payload.text }]);
     };
+    
+    const playNextAudio = () => {
+      if (audioQueueRef.current.length === 0) {
+        isPlayingRef.current = false;
+        return;
+      }
+      isPlayingRef.current = true;
+      const audio = audioQueueRef.current.shift();
+      if (audio) {
+        audio.play().catch(err => {
+          console.error('Audio playback failed:', err);
+          playNextAudio();
+        });
+        audio.onended = () => {
+          playNextAudio();
+        };
+      }
+    };
+
+    const handleAudioStream = (data: any) => {
+      const b64 = data.payload.audio_data;
+      const audio = new Audio("data:audio/mp3;base64," + b64);
+      audioQueueRef.current.push(audio);
+      if (!isPlayingRef.current) {
+        playNextAudio();
+      }
+    };
 
     voiceWebSocketClient.on('started', handleStarted);
     voiceWebSocketClient.on('transcript_diff', handleTranscriptDiff);
     voiceWebSocketClient.on('summary_completed', handleSummaryCompleted);
     voiceWebSocketClient.on('error', handleServerError);
     voiceWebSocketClient.on('chat_response', handleChatResponse);
+    voiceWebSocketClient.on('audio_stream', handleAudioStream);
 
     return () => {
       voiceWebSocketClient.off('started', handleStarted);
@@ -112,6 +144,7 @@ export function useVoiceWebSocket(): UseVoiceWebSocketResult {
       voiceWebSocketClient.off('summary_completed', handleSummaryCompleted);
       voiceWebSocketClient.off('error', handleServerError);
       voiceWebSocketClient.off('chat_response', handleChatResponse);
+      voiceWebSocketClient.off('audio_stream', handleAudioStream);
     };
   }, []);
 
