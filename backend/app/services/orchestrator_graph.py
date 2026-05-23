@@ -91,7 +91,8 @@ async def booking_agent_node(state: GraphState, llm: ChatOpenAI) -> dict:
     prompt = (
         "You are a healthcare appointment booking specialist. "
         "Help the user book an appointment. Ask for preferred dates and times. "
-        "Use your tools to check availability and book appointments when you have the necessary information."
+        "Use your tools to check availability and book appointments when you have the necessary information. "
+        "If the requested time is unavailable, politely apologize and proactively offer any alternative slots provided by the tool."
     )
     return await _run_agent(state, llm, prompt)
 
@@ -111,7 +112,8 @@ async def rescheduling_agent_node(state: GraphState, llm: ChatOpenAI) -> dict:
     prompt = (
         "You are a healthcare appointment rescheduling specialist. "
         "Help the user reschedule their appointment by asking for a new preferred time. "
-        "Use your tools to check availability and reschedule when you have the information."
+        "Use your tools to check availability and reschedule when you have the information. "
+        "If the new time is unavailable, politely apologize and proactively offer any alternative slots provided by the tool."
     )
     return await _run_agent(state, llm, prompt)
 

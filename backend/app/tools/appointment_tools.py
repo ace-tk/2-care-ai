@@ -35,6 +35,12 @@ async def book_appointment_tool(patient_id: int, doctor_id: int, start_time_iso:
             appt = await create_appointment(db, patient_id, doctor_id, start_time, end_time, reason)
             return f"Appointment booked successfully. ID: {appt.id}"
         except ValueError as e:
+            err_msg = str(e)
+            if "not available" in err_msg.lower():
+                alts = await suggest_alternative_slots(db, doctor_id, start_time)
+                if alts:
+                    alt_str = ", ".join([f"{a['start']} to {a['end']}" for a in alts])
+                    return f"Failed to book appointment: {err_msg}. IMPORTANT: Please offer the user these alternative slots: {alt_str}"
             return f"Failed to book appointment: {str(e)}"
         except Exception as e:
             return f"An error occurred: {str(e)}"
@@ -61,6 +67,15 @@ async def reschedule_appointment_tool(appointment_id: int, new_start_iso: str, n
             appt = await reschedule_appointment(db, appointment_id, new_start, new_end)
             return f"Appointment {appt.id} rescheduled successfully to {new_start_iso}."
         except ValueError as e:
+            err_msg = str(e)
+            if "not available" in err_msg.lower():
+                from backend.app.models.appointment import Appointment
+                appt = await db.get(Appointment, appointment_id)
+                if appt:
+                    alts = await suggest_alternative_slots(db, appt.doctor_id, new_start)
+                    if alts:
+                        alt_str = ", ".join([f"{a['start']} to {a['end']}" for a in alts])
+                        return f"Failed to reschedule appointment: {err_msg}. IMPORTANT: Please offer the user these alternative slots: {alt_str}"
             return f"Failed to reschedule appointment: {str(e)}"
         except Exception as e:
             return f"An error occurred: {str(e)}"
