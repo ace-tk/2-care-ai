@@ -1,315 +1,190 @@
-import logging
-import asyncio
-import time
-import base64
-from typing import Dict, Any, List
-from fastapi import WebSocket
-from sqlalchemy.ext.asyncio import AsyncSession
+"""
+voice_service.py
+----------------
+Orchestrates the multilingual voice pipeline:
 
-from backend.app.core.config import settings
-from backend.app.services.stt_service import STTService
-from backend.app.services.tts_service import TTSService
-from backend.app.services.llm_service import LLMService
-from backend.app.models.transcript import Transcript
-from backend.app.models.patient import Patient
+  Audio upload → Deepgram STT → Groq agent (tools + memory) → ElevenLabs TTS → response
+
+Reuses ai_service / groq_service for booking, cancel, and reschedule flows.
+"""
+
+import base64
+import logging
+import time
+import uuid
+from typing import Any, Dict, List, Optional
+
+from app.services.ai_service import ai_service
+from app.services.stt_service import get_stt_service
+from app.services.tts_service import synthesize_speech_safe
 
 logger = logging.getLogger(__name__)
 
 
-class VoiceSessionState:
-    """Represents the in-memory state of an active real-time voice session."""
-
-    def __init__(self, session_id: str, patient_id: int, creator_id: int):
-        self.session_id = session_id
-        self.patient_id = patient_id
-        self.creator_id = creator_id
-        self.session_language = "en"
-        self.is_active = True
-        self.audio_chunks: List[bytes] = []
-        self.transcript_history: List[str] = []
-        self.translation_history: List[str] = []
-        self.detected_languages: List[str] = []
-        self.chat_history: List[Dict[str, str]] = []
-        self.dg_connection = None
-
-
 class VoiceService:
-    """Orchestrator service for real-time multilingual voice consultations."""
+    """HTTP voice chat orchestrator (STT → LLM → TTS)."""
 
-    def __init__(self):
-        # Initialize sub-services with API keys from configurations
-        self.stt = STTService(api_key=settings.DEEPGRAM_API_KEY)
-        self.tts = TTSService(api_key=settings.ELEVENLABS_API_KEY)
-        self.llm = LLMService(api_key=settings.OPENAI_API_KEY)
-        
-        # Track active in-memory sessions: session_id -> VoiceSessionState
-        self.active_sessions: Dict[str, VoiceSessionState] = {}
-        # Track active web sockets: session_id -> WebSocket
-        self.active_sockets: Dict[str, WebSocket] = {}
-
-    async def register_connection(self, session_id: str, websocket: WebSocket):
-        """Register client websocket connection."""
-        self.active_sockets[session_id] = websocket
-        logger.info(f"Registered WebSocket connection for session: {session_id}")
-
-    async def unregister_connection(self, session_id: str):
-        """Remove and clean up connection."""
-        if session_id in self.active_sockets:
-            del self.active_sockets[session_id]
-        if session_id in self.active_sessions:
-            del self.active_sessions[session_id]
-        logger.info(f"Unregistered session: {session_id}")
-
-    async def start_session(
-        self, session_id: str, patient_id: int, creator_id: int, source_language: str = "en"
-    ) -> VoiceSessionState:
-        """Initializes state for a new audio streaming session and connects to Deepgram STT."""
-        state = VoiceSessionState(session_id, patient_id, creator_id)
-        state.session_language = source_language
-        self.active_sessions[session_id] = state
-        
-        # Define STT callback
-        async def on_transcript(data: dict):
-            websocket = self.active_sockets.get(session_id)
-            if not websocket:
-                return
-                
-            transcript = data.get("transcript", "")
-            lang = data.get("language", "en")
-            
-            if transcript:
-                state.transcript_history.append(transcript)
-                
-                # If language is auto or not detected yet, try to detect from text
-                if state.session_language == "auto" and data.get("is_final", False):
-                    detected = await self.llm.detect_language(transcript)
-                    if detected:
-                        state.session_language = detected
-                        lang = detected
-                else:
-                    lang = state.session_language if state.session_language != "auto" else "en"
-                    
-                if lang not in state.detected_languages:
-                    state.detected_languages.append(lang)
-                    
-                # Translate to English for internal system processing
-                translated = transcript
-                if lang != "en" and data.get("is_final", False):
-                    translated = await self.llm.translate_text(transcript, source_language=lang, target_language="en")
-                    state.translation_history.append(translated)
-                
-                # Broadcast real-time transcription to client
-                try:
-                    await websocket.send_json({
-                        "event": "transcript_diff",
-                        "session_id": session_id,
-                        "payload": {
-                            "original_text": transcript,
-                            "translated_text": translated,
-                            "language": lang,
-                            "is_final": data.get("is_final", False)
-                        }
-                    })
-                except Exception as e:
-                    logger.error(f"Error broadcasting transcript for {session_id}: {e}")
-
-        # Connect to Deepgram
-        try:
-            # Map "auto" or empty to "en" for Deepgram options
-            lang_code = source_language if source_language and source_language != "auto" else "en"
-            dg_conn = await self.stt.create_streaming_session(
-                on_transcript=on_transcript,
-                sample_rate=settings.AUDIO_SAMPLE_RATE,
-                language=lang_code
-            )
-            state.dg_connection = dg_conn
-        except Exception as e:
-            logger.error(f"Failed to initialize STT for session {session_id}: {e}")
-            
-        logger.info(f"Started voice session state for {session_id} (Patient: {patient_id})")
-        return state
-
-    async def process_audio_chunk(self, session_id: str, chunk: bytes, recv_time: float = None):
-        """Processes incoming audio packet.
-        
-        1. Accumulates binary audio.
-        2. Logs chunk metrics and transmission timing.
+    async def process_voice_chat(
+        self,
+        audio_bytes: bytes,
+        *,
+        session_id: Optional[str] = None,
+        content_type: str = "audio/webm",
+        language_hint: str = "auto",
+    ) -> Dict[str, Any]:
         """
-        state = self.active_sessions.get(session_id)
-        websocket = self.active_sockets.get(session_id)
-        
-        if not state or not websocket:
-            logger.error(f"Cannot process audio: Session {session_id} is inactive or missing socket.")
-            return
+        Run the full voice pipeline and return transcript, AI text, audio, traces, metrics.
+        """
+        pipeline_start = time.perf_counter()
+        session_id = session_id or str(uuid.uuid4())
 
-        # 1. Accumulate audio bytes
-        state.audio_chunks.append(chunk)
+        # Ensure Groq session memory exists for tool continuity
+        ai_service.register_session(session_id)
 
-        # 2. Log audio chunk metadata
-        chunk_size = len(chunk)
-        process_time = time.time()
-        timing_ms = (process_time - recv_time) * 1000 if recv_time else 0.0
-        
-        logger.info(
-            f"[AUDIO_PIPELINE] Session {session_id[:8]} | "
-            f"Chunk Size: {chunk_size:4d} bytes | "
-            f"Queue Latency: {timing_ms:.2f} ms | "
-            f"Total Chunks: {len(state.audio_chunks)}"
-        )
-
-        # 3. Stream to Deepgram STT
-        if state.dg_connection:
-            stt_start_time = time.time()
-            try:
-                await state.dg_connection.send(chunk)
-                stt_latency = (time.time() - stt_start_time) * 1000
-                logger.debug(f"[STT_STREAM] Sent chunk to Deepgram (Send Latency: {stt_latency:.2f} ms)")
-            except Exception as e:
-                logger.error(f"Deepgram send error for session {session_id}: {e}")
-
-    async def process_chat_message(self, session_id: str, text: str):
-        """Processes an incoming text chat message, appending to history and generating an LLM response."""
-        state = self.active_sessions.get(session_id)
-        websocket = self.active_sockets.get(session_id)
-        
-        if not state or not websocket:
-            logger.error(f"Cannot process chat: Session {session_id} is inactive or missing socket.")
-            return
-            
-        # Append user message to state
-        state.chat_history.append({"sender": "user", "text": text})
-        
-        # Detect language if auto
-        if state.session_language == "auto":
-            state.session_language = await self.llm.detect_language(text)
-            
-        # Define real-time trace callback
-        async def on_trace(trace_event: dict):
-            try:
-                await websocket.send_json({
-                    "event": "reasoning_trace",
-                    "session_id": session_id,
-                    "payload": trace_event
-                })
-            except Exception as e:
-                logger.error(f"Failed to send trace event to {session_id}: {e}")
-
-        # Generate conversational response using OpenAI Orchestrator
-        try:
-            # We pass the new prompt and the history excluding the new prompt itself
-            ai_response = await self.llm.generate_response(
-                prompt=text, 
-                session_id=session_id,
-                history=state.chat_history[:-1],
-                language=state.session_language,
-                trace_callback=on_trace
-            )
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            ai_response = "I apologize, but I am currently unable to process your request."
-            
-        # Append AI response to state
-        state.chat_history.append({"sender": "ai", "text": ai_response})
-        
-        # Send back to client
-        try:
-            await websocket.send_json({
-                "event": "chat_response",
-                "session_id": session_id,
-                "payload": {"text": ai_response, "sender": "ai"}
-            })
-        except Exception as e:
-            logger.error(f"Failed to send chat response to {session_id}: {e}")
-            
-        # Stream TTS audio
-        async def text_iterator():
-            # Yield chunks to simulate stream or pass directly
-            words = ai_response.split(" ")
-            for i in range(0, len(words), 5):
-                chunk = " ".join(words[i:i+5]) + " "
-                yield chunk
-                await asyncio.sleep(0.01)
-                
-        try:
-            async for audio_chunk in self.tts.stream_speech(text_iterator()):
-                b64_audio = base64.b64encode(audio_chunk).decode('utf-8')
-                await websocket.send_json({
-                    "event": "audio_stream",
-                    "session_id": session_id,
-                    "payload": {
-                        "audio_data": b64_audio
-                    }
-                })
-        except Exception as e:
-            logger.error(f"Error streaming TTS audio to client: {e}")
-
-    async def finalize_session(self, session_id: str, db: AsyncSession) -> Transcript:
-        """Ends streaming, generates SOAP clinical notes, and saves to database."""
-        state = self.active_sessions.get(session_id)
-        websocket = self.active_sockets.get(session_id)
-
-        if not state:
-            raise ValueError(f"Session {session_id} not found.")
-
-        logger.info(f"Finalizing session: {session_id}. Compiling documentation...")
-
-        # 1. Stop Deepgram streaming
-        if state.dg_connection:
-            try:
-                await state.dg_connection.finish()
-            except Exception as e:
-                logger.error(f"Error finishing Deepgram stream: {e}")
-
-        # 1. Get full conversations
-        full_original = " ".join(state.transcript_history)
-        full_translated = " ".join(state.translation_history)
-        detected_lang = state.detected_languages[0] if state.detected_languages else "en"
-
-        # Fetch patient details for context
-        patient = await db.get(Patient, state.patient_id)
-        patient_info = {
-            "id": patient.id if patient else state.patient_id,
-            "first_name": patient.first_name if patient else "Unknown",
-            "last_name": patient.last_name if patient else "Patient",
+        traces: List[dict] = []
+        metrics = {
+            "stt_latency_ms": 0.0,
+            "llm_latency_ms": 0.0,
+            "tts_latency_ms": 0.0,
+            "total_latency_ms": 0.0,
         }
 
-        # 2. Generate SOAP note
-        clinical_summary = await self.llm.generate_clinical_summary(
-            transcript=full_translated or full_original, 
-            patient_info=patient_info
+        # ── 1. Speech-to-text ─────────────────────────────────────────────
+        stt = get_stt_service()
+        if not stt:
+            return self._error_response(
+                session_id,
+                "Speech recognition is not configured. Set DEEPGRAM_API_KEY.",
+                metrics,
+                traces,
+            )
+
+        stt_result = await stt.transcribe_audio(
+            audio_bytes,
+            content_type=content_type,
+            language_hint=language_hint,
+        )
+        metrics["stt_latency_ms"] = stt_result.get("latency_ms", 0)
+
+        if stt_result.get("error"):
+            return self._error_response(
+                session_id,
+                stt_result["error"],
+                metrics,
+                traces,
+                transcript=stt_result.get("transcript", ""),
+            )
+
+        transcript = (stt_result.get("transcript") or "").strip()
+        detected_language = stt_result.get("detected_language", "en")
+
+        if not transcript:
+            return self._error_response(
+                session_id,
+                "I could not hear any speech. Please try again.",
+                metrics,
+                traces,
+                transcript="",
+                detected_language=detected_language,
+            )
+
+        logger.info(
+            "[VOICE] STT complete | session=%s | lang=%s | text='%s'",
+            session_id,
+            detected_language,
+            transcript[:80],
         )
 
-        # 3. Save to database
-        db_transcript = Transcript(
-            patient_id=state.patient_id,
-            creator_id=state.creator_id,
-            session_id=session_id,
-            audio_url=None,  # In production: upload state.audio_chunks to S3/GCS and save URL
-            detected_language=detected_lang,
-            original_text=full_original,
-            translated_text=full_translated,
-            clinical_summary=clinical_summary,
+        # ── 2. Groq LLM + scheduling tools ────────────────────────────────
+        async def _collect_trace(event: dict):
+            traces.append(event)
+
+        llm_start = time.perf_counter()
+        try:
+            ai_text, llm_traces = await ai_service.generate_response(
+                session_id=session_id,
+                user_text=transcript,
+                trace_callback=_collect_trace,
+                stt_language=detected_language,
+                stt_confidence=stt_result.get("confidence"),
+            )
+            traces.extend(llm_traces)
+        except Exception as exc:
+            logger.error("[VOICE] LLM failed: %s", exc, exc_info=True)
+            ai_text = (
+                "I apologize, but I could not process your request right now. "
+                "Please try again."
+            )
+        metrics["llm_latency_ms"] = (time.perf_counter() - llm_start) * 1000
+
+        if not (ai_text or "").strip():
+            ai_text = "I processed your request but could not generate a spoken reply."
+
+        logger.info(
+            "[VOICE] LLM complete | session=%s | latency=%.1fms | chars=%d",
+            session_id,
+            metrics["llm_latency_ms"],
+            len(ai_text),
         )
-        
-        db.add(db_transcript)
-        await db.commit()
-        await db.refresh(db_transcript)
 
-        # 4. Notify client of completion
-        if websocket:
-            await websocket.send_json({
-                "event": "summary_completed",
-                "session_id": session_id,
-                "payload": {
-                    "transcript_id": db_transcript.id,
-                    "clinical_summary": clinical_summary,
-                }
-            })
+        # ── 3. Text-to-speech (optional — never fails the pipeline) ────────
+        audio_base64 = ""
+        audio_mime = "audio/mpeg"
+        tts_result = await synthesize_speech_safe(ai_text, language=detected_language)
+        metrics["tts_latency_ms"] = tts_result.get("latency_ms", 0)
+        if not tts_result.get("fallback_mode") and tts_result.get("audio_bytes"):
+            audio_base64 = base64.b64encode(tts_result["audio_bytes"]).decode("utf-8")
+            audio_mime = tts_result.get("mime_type", "audio/mpeg")
 
-        # 5. Clean up in-memory sessions
-        await self.unregister_connection(session_id)
-        
-        return db_transcript
+        metrics["total_latency_ms"] = (time.perf_counter() - pipeline_start) * 1000
+
+        logger.info(
+            "[VOICE] Pipeline complete | session=%s | STT=%.0fms LLM=%.0fms TTS=%.0fms TOTAL=%.0fms",
+            session_id,
+            metrics["stt_latency_ms"],
+            metrics["llm_latency_ms"],
+            metrics["tts_latency_ms"],
+            metrics["total_latency_ms"],
+        )
+
+        return {
+            "session_id": session_id,
+            "transcript": transcript,
+            "detected_language": detected_language,
+            "ai_response": ai_text,
+            "audio_base64": audio_base64,
+            "audio_mime_type": audio_mime,
+            "reasoning_traces": traces,
+            "metrics": metrics,
+            "success": True,
+        }
+
+    def _error_response(
+        self,
+        session_id: str,
+        message: str,
+        metrics: dict,
+        traces: List[dict],
+        transcript: str = "",
+        detected_language: str = "en",
+    ) -> Dict[str, Any]:
+        metrics["total_latency_ms"] = (
+            metrics.get("stt_latency_ms", 0)
+            + metrics.get("llm_latency_ms", 0)
+            + metrics.get("tts_latency_ms", 0)
+        )
+        return {
+            "session_id": session_id,
+            "transcript": transcript,
+            "detected_language": detected_language,
+            "ai_response": message,
+            "audio_base64": "",
+            "audio_mime_type": "audio/mpeg",
+            "reasoning_traces": traces,
+            "metrics": metrics,
+            "success": False,
+        }
 
 
+# Lazy singleton — does not import Deepgram SDK at module load
 voice_service = VoiceService()

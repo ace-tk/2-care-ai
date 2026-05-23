@@ -5,10 +5,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from backend.app import schemas, models
-from backend.app.api import deps
-from backend.app.core import security
-from backend.app.core.config import settings
+from app import schemas, models
+from app.api import deps
+from app.core import security
+from app.core.config import settings
 
 router = APIRouter()
 

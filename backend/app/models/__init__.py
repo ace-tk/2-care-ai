@@ -1,7 +1,9 @@
-from backend.app.core.database import Base
-from backend.app.models.doctor import Doctor
-from backend.app.models.appointment import Appointment
-from backend.app.models.patient import Patient
-from backend.app.models.transcript import Transcript
+from app.core.database import Base
+from app.models.user import User
+from app.models.doctor import Doctor
+from app.models.appointment import Appointment
+from app.models.patient import Patient
+from app.models.transcript import Transcript
+from app.models.campaign_log import CampaignLog
 
-__all__ = ["Base", "User", "Patient", "Doctor", "Appointment", "Transcript"]
+__all__ = ["Base", "User", "Patient", "Doctor", "Appointment", "Transcript", "CampaignLog"]

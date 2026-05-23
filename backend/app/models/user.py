@@ -1,6 +1,6 @@
 from sqlalchemy import String, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from backend.app.core.database import Base
+from app.core.database import Base
 
 
 class User(Base):

@@ -1,7 +1,7 @@
 from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.core.database import Base
+from app.core.database import Base
 
 ModelType = TypeVar("ModelType", bound=Base)
 

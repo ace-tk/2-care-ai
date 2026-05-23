@@ -1,7 +1,8 @@
-from sqlalchemy import String, Boolean, Date
+from sqlalchemy import String, Boolean, Date, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import date
-from backend.app.core.database import Base
+from typing import Optional
+from app.core.database import Base
 
 
 class Patient(Base):
@@ -12,7 +13,11 @@ class Patient(Base):
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     date_of_birth: Mapped[date] = mapped_column(Date, nullable=False)
-    language_preference: Mapped[str] = mapped_column(String(10), default="en")  # en, es, fr, zh, etc.
+    language_preference: Mapped[str] = mapped_column(String(10), default="en")  # en, hi, ta
+    preferred_doctor_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("doctors.id"), nullable=True, index=True
+    )
+    last_interaction_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships to audio transcripts of consultations

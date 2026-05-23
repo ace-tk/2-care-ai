@@ -4,11 +4,12 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.app.core.config import settings
-from backend.app.core.logging import setup_logging
-from backend.app.api.v1.router import api_router
-from backend.app.core.database import Base, engine
-from backend.app.services.campaign_service import campaign_service
+from app.core.config import settings
+from app.core.logging import setup_logging
+from app.api.v1.router import api_router
+from app.core.database import Base, engine
+from app.services.campaign_service import campaign_service
+import app.models  # noqa: F401 — register ORM models for create_all
 
 # Set up system-wide logger
 setup_logging()
@@ -19,25 +20,37 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifecycle events manager for database connection & worker setup."""
     logger.info("Initializing system dependencies...")
-    
-    # Development database schema auto-creation placeholder
-    # In production, Alembic migrations should be used exclusively.
-    if settings.ENV == "development":
-        logger.info("Dev Mode: Auto-creating database tables if they do not exist...")
+    logger.info("Using %s database", settings.database_label)
+    logger.info("DATABASE_URL (configured): %s", settings.DATABASE_URL)
+    logger.info("DATABASE_URL (runtime engine): %s", settings.async_database_url)
+
+    if settings.should_bootstrap_database:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables verified.")
+                from app.db.migrations import apply_dev_schema_patches
+
+                await apply_dev_schema_patches(conn)
+            logger.info("Tables created successfully.")
+
+            from app.core.database import AsyncSessionLocal
+            from app.db.seed import run_startup_seed
+
+            async with AsyncSessionLocal() as db:
+                await run_startup_seed(db)
+            logger.info("Doctor seed data loaded.")
         except Exception as e:
-            logger.error(f"Failed to auto-create database tables: {e}")
-            
-    # Start background workers
+            logger.error("Database bootstrap failed: %s", e, exc_info=True)
+    else:
+        logger.info("Database bootstrap skipped (production PostgreSQL mode).")
+
     await campaign_service.start_worker()
-            
+    logger.info("Outbound campaign worker running.")
+
     yield
-    
-    logger.info("Shutting down and cleaning up resources...")
+
     await campaign_service.stop_worker()
+    logger.info("Shutting down and cleaning up resources...")
     await engine.dispose()
 
 
@@ -78,4 +91,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health", status_code=status.HTTP_200_OK, tags=["system"])
 async def health_check():
     """Health check endpoint for container orchestrators and load balancers."""
-    return {"status": "healthy", "project": settings.PROJECT_NAME}
+    return {
+        "status": "healthy",
+        "project": settings.PROJECT_NAME,
+        "database": settings.database_label.lower(),
+        "database_url": settings.DATABASE_URL,
+        "async_database_url": settings.async_database_url,
+    }

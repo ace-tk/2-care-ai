@@ -1,31 +1,49 @@
-from typing import Optional, Literal, Any, Dict
-from pydantic import BaseModel
+"""Schemas for voice HTTP chat and WebSocket events."""
+
+from typing import Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+# ── WebSocket control messages (client → server) ─────────────────────────────
+
+class VoiceSessionStart(BaseModel):
+    patient_id: int
+    source_language: str = "auto"
+
+
+class VoiceTextPayload(BaseModel):
+    text: str
 
 
 class VoiceControlMessage(BaseModel):
-    """Base schema for client-initiated control messages sent over WebSocket."""
-    type: Literal["start", "stop", "config", "pause", "resume", "text"]
-    payload: Optional[Dict[str, Any]] = None
+    type: Literal["start", "text", "stop", "trigger_outbound"]
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
-class VoiceSessionStart(BaseModel):
-    """Payload sent by client to start a voice streaming session."""
-    patient_id: int
-    input_sample_rate: int = 16000
-    source_language: str = "auto"  # auto, en, es, fr, zh, etc.
-    target_language: str = "en"    # language to translate into, if applicable
-
+# ── WebSocket server events (server → client) ──────────────────────────────────
 
 class VoiceServerEvent(BaseModel):
-    """Schema for server-initiated events broadcasted to the client."""
-    event: Literal[
-        "connected", 
-        "started", 
-        "transcript_diff", 
-        "audio_response", 
-        "summary_completed", 
-        "error",
-        "chat_response"
-    ]
+    event: str
     session_id: str
-    payload: Dict[str, Any]
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ── HTTP POST /voice/chat ──────────────────────────────────────────────────────
+
+class VoiceChatMetrics(BaseModel):
+    stt_latency_ms: float = 0
+    llm_latency_ms: float = 0
+    tts_latency_ms: float = 0
+    total_latency_ms: float = 0
+
+
+class VoiceChatResponse(BaseModel):
+    session_id: str
+    transcript: str
+    detected_language: str
+    ai_response: str
+    audio_base64: str = Field(description="MP3 audio encoded as base64")
+    audio_mime_type: str = "audio/mpeg"
+    reasoning_traces: List[Dict[str, Any]] = Field(default_factory=list)
+    metrics: VoiceChatMetrics

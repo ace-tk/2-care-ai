@@ -2,9 +2,9 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app import schemas
-from backend.app.api import deps
-from backend.app.services.patient_service import patient_service
+from app import schemas
+from app.api import deps
+from app.services.patient_service import patient_service
 
 router = APIRouter()
 

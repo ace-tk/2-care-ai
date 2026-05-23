@@ -1,89 +1,175 @@
+"""
+stt_service.py
+--------------
+Speech-to-text via Deepgram prerecorded API (httpx).
+
+Supports browser MediaRecorder formats (webm, wav, mp4) with automatic
+language detection for English, Hindi, and Tamil.
+"""
+
 import logging
-import asyncio
 import time
-from typing import Callable, Any
-from deepgram import (
-    DeepgramClient,
-    DeepgramClientOptions,
-    LiveTranscriptionEvents,
-    LiveOptions,
-)
+from typing import Optional
+
+import httpx
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Deepgram BCP-47 / ISO codes → app language keys
+_LANGUAGE_MAP = {
+    "en": "en",
+    "en-us": "en",
+    "en-gb": "en",
+    "hi": "hi",
+    "ta": "ta",
+    "tamil": "ta",
+    "hindi": "hi",
+}
+
+
+def _normalize_language(detected: Optional[str]) -> str:
+    if not detected:
+        return "en"
+    key = detected.lower().strip()
+    if key in _LANGUAGE_MAP:
+        return _LANGUAGE_MAP[key]
+    prefix = key.split("-")[0]
+    return _LANGUAGE_MAP.get(prefix, "en")
+
+
 class STTService:
-    """Service interface for real-time Speech-to-Text transcription via Deepgram."""
+    """Transcribe uploaded audio using Deepgram."""
 
     def __init__(self, api_key: str):
+        if not api_key or api_key.startswith("your_"):
+            raise ValueError("DEEPGRAM_API_KEY is not configured.")
         self.api_key = api_key
-        # Deepgram client configuration
-        config = DeepgramClientOptions(options={"keepalive": "true"})
-        self.client = DeepgramClient(api_key, config)
-        logger.info("Deepgram STT service initialized.")
+        logger.info("Deepgram STT service initialized (prerecorded API).")
 
-    async def create_streaming_session(
-        self, 
-        on_transcript: Callable[[dict], None], 
-        sample_rate: int = 16000, 
-        language: str = "en"
-    ):
-        """Creates a bidirectional streaming connection with Deepgram.
-        
-        Args:
-            on_transcript: Callback fired when a transcript is received.
-            sample_rate: Expected audio sample rate in Hz.
-            language: Language code (e.g., 'en', 'es').
-            
-        Returns:
-            The active Deepgram websocket connection capable of receiving audio via .send()
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        content_type: str = "audio/webm",
+        language_hint: str = "auto",
+    ) -> dict:
         """
-        logger.info(f"Initializing Deepgram real-time stream (Language: {language})")
-        
-        dg_connection = self.client.listen.asyncwebsocket.v("1")
-        
-        async def on_message(self_dg, result, **kwargs):
-            try:
-                if not result or not result.channel or not result.channel.alternatives:
-                    return
-                
-                sentence = result.channel.alternatives[0].transcript
-                if not sentence:
-                    return
-                    
-                is_final = result.is_final
-                
-                # We can also track transcription latency here if we wanted to extract timestamps
-                logger.debug(f"[DEEPGRAM] Transcript received: {sentence} (Final: {is_final})")
-                
-                if is_final:
-                    # Execute callback to pipe transcript back to orchestrator
-                    await on_transcript({
-                        "transcript": sentence,
-                        "is_final": is_final,
-                        "language": language
-                    })
-            except Exception as e:
-                logger.error(f"Error processing Deepgram message: {e}", exc_info=True)
+        Transcribe audio bytes.
 
-        async def on_error(self_dg, error, **kwargs):
-            logger.error(f"Deepgram stream error: {error}")
+        Returns:
+            {
+              "transcript": str,
+              "detected_language": "en" | "hi" | "ta",
+              "confidence": float | None,
+              "latency_ms": float,
+            }
+        """
+        if not audio_bytes:
+            return {
+                "transcript": "",
+                "detected_language": "en",
+                "confidence": None,
+                "latency_ms": 0,
+                "error": "Empty audio payload.",
+            }
 
-        dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-        dg_connection.on(LiveTranscriptionEvents.Error, on_error)
+        url = "https://api.deepgram.com/v1/listen"
+        params: dict = {
+            "model": "nova-2",
+            "smart_format": "true",
+            "detect_language": "true",
+            "punctuate": "true",
+        }
 
-        options = LiveOptions(
-            model="nova-2",
-            language=language,
-            smart_format=True,
-            encoding="linear16",
-            sample_rate=sample_rate,
-            channels=1
+        # Optional hint for Deepgram when not auto
+        if language_hint and language_hint != "auto":
+            lang = language_hint.lower()
+            if lang in ("en", "hi", "ta", "es", "fr", "zh"):
+                params["language"] = lang
+
+        headers = {
+            "Authorization": f"Token {self.api_key}",
+            "Content-Type": content_type or "audio/webm",
+        }
+
+        t0 = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                response = await client.post(
+                    url,
+                    params=params,
+                    headers=headers,
+                    content=audio_bytes,
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            detail = exc.response.text[:300]
+            logger.error("[STT] Deepgram HTTP %s: %s", exc.response.status_code, detail)
+            return {
+                "transcript": "",
+                "detected_language": "en",
+                "confidence": None,
+                "latency_ms": latency_ms,
+                "error": f"Speech recognition failed: {detail}",
+            }
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            logger.error("[STT] Deepgram error: %s", exc, exc_info=True)
+            return {
+                "transcript": "",
+                "detected_language": "en",
+                "confidence": None,
+                "latency_ms": latency_ms,
+                "error": str(exc),
+            }
+
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        transcript = ""
+        confidence = None
+        detected_lang = "en"
+
+        try:
+            results = payload.get("results", {})
+            channels = results.get("channels", [])
+            if channels:
+                alt = channels[0].get("alternatives", [])
+                if alt:
+                    transcript = (alt[0].get("transcript") or "").strip()
+                    confidence = alt[0].get("confidence")
+            detected_raw = (
+                results.get("channels", [{}])[0]
+                .get("detected_language")
+                or payload.get("metadata", {}).get("detected_language")
+            )
+            detected_lang = _normalize_language(detected_raw)
+        except (IndexError, KeyError, TypeError) as exc:
+            logger.warning("[STT] Unexpected Deepgram response shape: %s", exc)
+
+        logger.info(
+            "[STT] Transcribed %d chars | lang=%s | latency=%.1fms",
+            len(transcript),
+            detected_lang,
+            latency_ms,
         )
-        
-        # Start connection
-        if await dg_connection.start(options) is False:
-            logger.error("Failed to start Deepgram connection")
-            raise RuntimeError("Failed to connect to Deepgram streaming API")
-            
-        logger.info("Deepgram streaming connection established.")
-        return dg_connection
+
+        return {
+            "transcript": transcript,
+            "detected_language": detected_lang,
+            "confidence": confidence,
+            "latency_ms": latency_ms,
+        }
+
+
+def get_stt_service() -> Optional[STTService]:
+    """Factory — returns None if API key missing."""
+    key = settings.DEEPGRAM_API_KEY
+    if not key or key.startswith("your_"):
+        return None
+    try:
+        return STTService(api_key=key)
+    except ValueError:
+        return None

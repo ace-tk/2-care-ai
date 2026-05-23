@@ -1,8 +1,8 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from backend.app.models.patient import Patient
-from backend.app.services.base import BaseService
+from app.models.patient import Patient
+from app.services.base import BaseService
 
 
 class PatientService(BaseService[Patient]):

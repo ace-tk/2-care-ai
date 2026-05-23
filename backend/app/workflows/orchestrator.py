@@ -5,7 +5,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, AnyMessage, ToolMessage
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from backend.app.tools import (
+from app.tools import (
     check_availability_tool,
     book_appointment_tool,
     cancel_appointment_tool,
@@ -186,20 +186,39 @@ def build_orchestrator_graph(api_key: str):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=api_key)
     llm_with_tools = llm.bind_tools(tools_list)
 
+    # Proper async wrapper functions (lambdas cannot await)
+    async def _router(state):
+        return await router_node(state, llm)
+
+    async def _booking(state):
+        return await booking_agent_node(state, llm_with_tools)
+
+    async def _cancellation(state):
+        return await cancellation_agent_node(state, llm_with_tools)
+
+    async def _rescheduling(state):
+        return await rescheduling_agent_node(state, llm_with_tools)
+
+    async def _conflict(state):
+        return await conflict_handler_node(state, llm_with_tools)
+
+    async def _general(state):
+        return await general_assistant_node(state, llm_with_tools)
+
     workflow = StateGraph(GraphState)
 
-    # Add nodes
-    workflow.add_node("router", lambda state: router_node(state, llm)) # Router doesn't need tools
-    workflow.add_node("booking_agent", lambda state: booking_agent_node(state, llm_with_tools))
-    workflow.add_node("cancellation_agent", lambda state: cancellation_agent_node(state, llm_with_tools))
-    workflow.add_node("rescheduling_agent", lambda state: rescheduling_agent_node(state, llm_with_tools))
-    workflow.add_node("conflict_handler", lambda state: conflict_handler_node(state, llm_with_tools))
-    workflow.add_node("general_assistant", lambda state: general_assistant_node(state, llm_with_tools))
+    # Add nodes using proper async wrappers
+    workflow.add_node("router", _router)
+    workflow.add_node("booking_agent", _booking)
+    workflow.add_node("cancellation_agent", _cancellation)
+    workflow.add_node("rescheduling_agent", _rescheduling)
+    workflow.add_node("conflict_handler", _conflict)
+    workflow.add_node("general_assistant", _general)
     workflow.add_node("tools", tool_node)
 
     # Entry point
     workflow.add_edge(START, "router")
-    
+
     # Conditional routing from the router node
     workflow.add_conditional_edges(
         "router",
@@ -240,3 +259,4 @@ def build_orchestrator_graph(api_key: str):
 
     memory = MemorySaver()
     return workflow.compile(checkpointer=memory)
+

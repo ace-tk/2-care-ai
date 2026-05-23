@@ -1,93 +1,271 @@
+"""
+tts_service.py
+--------------
+Text-to-speech via ElevenLabs REST API (httpx).
+
+Failures (401/402/quota/payment) never break the voice pipeline — text-only fallback.
+"""
+
+import asyncio
 import logging
 import time
-import json
-import base64
-import websockets
-import asyncio
-from typing import AsyncGenerator
+from typing import Optional
+
+import httpx
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+FALLBACK_LOG = "[TTS DISABLED - FALLBACK TEXT MODE]"
+
+# After billing/auth failure, skip ElevenLabs for remainder of process (avoid 402 spam)
+_tts_suppressed_reason: Optional[str] = None
+_fallback_logged: set[str] = set()
+
+
+def _log_fallback_once(reason: str) -> None:
+    if reason in _fallback_logged:
+        return
+    _fallback_logged.add(reason)
+    logger.warning("%s %s", FALLBACK_LOG, reason)
+
+
+def is_tts_enabled() -> bool:
+    """Whether TTS should be attempted (config + runtime suppression)."""
+    if not settings.ENABLE_TTS:
+        return False
+    if _tts_suppressed_reason:
+        return False
+    key = settings.ELEVENLABS_API_KEY
+    if not key or key.startswith("your_"):
+        return False
+    return True
+
+
+def suppress_tts(reason: str) -> None:
+    """Disable further ElevenLabs calls this process lifetime."""
+    global _tts_suppressed_reason
+    _tts_suppressed_reason = reason
+    _log_fallback_once(reason)
+
+
+def _is_billing_or_auth_error(status_code: int, body: str) -> bool:
+    if status_code in (401, 402):
+        return True
+    lower = (body or "").lower()
+    return any(
+        token in lower
+        for token in (
+            "payment_required",
+            "quota",
+            "quota_exceeded",
+            "insufficient",
+            "subscription",
+            "billing",
+            "unauthorized",
+        )
+    )
+
 
 class TTSService:
-    """Service interface for Text-to-Speech synthesis.
-    
-    This abstracts converting text responses back into audio (e.g., ElevenLabs, OpenAI TTS).
-    """
+    """Convert AI text responses to MP3 audio."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, voice_id: Optional[str] = None):
+        if not api_key or api_key.startswith("your_"):
+            raise ValueError("ELEVENLABS_API_KEY is not configured.")
         self.api_key = api_key
-        logger.info("Text-to-Speech service placeholder initialized.")
+        self.voice_id = voice_id or getattr(
+            settings, "ELEVENLABS_VOICE_ID", DEFAULT_VOICE_ID
+        )
+        logger.info("ElevenLabs TTS service initialized.")
 
     async def synthesize_speech(
-        self, text: str, voice_id: str = "default", language: str = "en"
-    ) -> bytes:
-        """Synthesizes text into a complete audio file.
-        
-        Returns:
-            bytes: The raw audio data (e.g., MP3 or PCM)
+        self,
+        text: str,
+        language: str = "en",
+    ) -> dict:
         """
-        logger.debug(f"Synthesizing text: '{text[:30]}...' in language: {language}")
-        
-        # MOCK return value - returns empty bytes as placeholder
-        return b""
+        Synthesize full utterance as MP3.
 
-    async def stream_speech(
-        self, text_stream: AsyncGenerator[str, None], voice_id: str = "cjVigY5qzO86HufA2TX8"  # Default Rachel voice
-    ) -> AsyncGenerator[bytes, None]:
-        """Converts an incoming stream of text into an outgoing stream of audio chunks.
-        
-        Allows for low-latency playback where voice begins before LLM completes response.
+        Returns:
+            { audio_bytes, mime_type, latency_ms, error, fallback_mode }
+            Never raises — errors are returned in the dict.
         """
-        logger.info("Starting real-time text-to-speech audio stream...")
-        
-        # Use eleven_multilingual_v2 for English, Hindi, and Tamil support
-        ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_multilingual_v2&output_format=mp3_44100_128"
-        
+        clean = (text or "").strip()
+        if not clean:
+            return {
+                "audio_bytes": b"",
+                "mime_type": "audio/mpeg",
+                "latency_ms": 0,
+                "error": None,
+                "fallback_mode": True,
+            }
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
         headers = {
-            "xi-api-key": self.api_key
+            "xi-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
         }
-        
-        start_time = time.time()
-        first_chunk_time = None
-        
+        body = {
+            "text": clean,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.4,
+                "similarity_boost": 0.75,
+            },
+        }
+
+        t0 = time.perf_counter()
         try:
-            async with websockets.connect(ws_url, additional_headers=headers) as ws:
-                
-                async def sender():
-                    async for chunk in text_stream:
-                        if chunk.strip():
-                            payload = {"text": chunk + " ", "try_trigger_generation": True}
-                            await ws.send(json.dumps(payload))
-                    
-                    # Send empty text to indicate end of stream
-                    await ws.send(json.dumps({"text": ""}))
-                
-                sender_task = asyncio.create_task(sender())
-                
-                while True:
-                    try:
-                        message = await ws.recv()
-                        data = json.loads(message)
-                        
-                        if data.get("audio"):
-                            if not first_chunk_time:
-                                first_chunk_time = time.time()
-                                latency = (first_chunk_time - start_time) * 1000
-                                logger.info(f"TTS Time-To-First-Byte (TTFB): {latency:.2f} ms")
-                                
-                            audio_bytes = base64.b64decode(data["audio"])
-                            yield audio_bytes
-                            
-                        if data.get("isFinal"):
-                            logger.info("ElevenLabs stream completed.")
-                            break
-                            
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.warning("ElevenLabs connection closed early.")
-                        break
-                        
-                await sender_task
-                
-        except Exception as e:
-            logger.error(f"Error in ElevenLabs TTS stream: {e}", exc_info=True)
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                response = await client.post(url, headers=headers, json=body)
+                if response.status_code >= 400:
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    snippet = response.text[:300]
+                    if _is_billing_or_auth_error(response.status_code, snippet):
+                        reason = f"ElevenLabs HTTP {response.status_code} (billing/auth)"
+                        suppress_tts(reason)
+                        return {
+                            "audio_bytes": b"",
+                            "mime_type": "audio/mpeg",
+                            "latency_ms": latency_ms,
+                            "error": None,
+                            "fallback_mode": True,
+                        }
+                    logger.warning(
+                        "[TTS] ElevenLabs HTTP %s — text-only fallback",
+                        response.status_code,
+                    )
+                    return {
+                        "audio_bytes": b"",
+                        "mime_type": "audio/mpeg",
+                        "latency_ms": latency_ms,
+                        "error": None,
+                        "fallback_mode": True,
+                    }
+                audio_bytes = response.content
+        except httpx.HTTPStatusError as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            status = exc.response.status_code
+            snippet = exc.response.text[:300]
+            if _is_billing_or_auth_error(status, snippet):
+                suppress_tts(f"ElevenLabs HTTP {status} (billing/auth)")
+            else:
+                logger.warning("[TTS] HTTP error %s — text-only fallback", status)
+            return {
+                "audio_bytes": b"",
+                "mime_type": "audio/mpeg",
+                "latency_ms": latency_ms,
+                "error": None,
+                "fallback_mode": True,
+            }
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            logger.warning("[TTS] Synthesis failed (%s) — text-only fallback", exc)
+            return {
+                "audio_bytes": b"",
+                "mime_type": "audio/mpeg",
+                "latency_ms": latency_ms,
+                "error": None,
+                "fallback_mode": True,
+            }
+
+        latency_ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "[TTS] Synthesized %d bytes | lang=%s | latency=%.1fms",
+            len(audio_bytes),
+            language,
+            latency_ms,
+        )
+        return {
+            "audio_bytes": audio_bytes,
+            "mime_type": "audio/mpeg",
+            "latency_ms": latency_ms,
+            "error": None,
+            "fallback_mode": False,
+        }
+
+
+def get_tts_service() -> Optional[TTSService]:
+    if not is_tts_enabled():
+        return None
+    try:
+        return TTSService(api_key=settings.ELEVENLABS_API_KEY)
+    except ValueError:
+        return None
+
+
+async def synthesize_speech_safe(
+    text: str,
+    language: str = "en",
+    *,
+    timeout_sec: float = 8.0,
+) -> dict:
+    """
+    Safe TTS entry for voice pipeline — never raises, never fails the AI turn.
+
+    Returns:
+        audio_bytes, mime_type, latency_ms, fallback_mode (bool)
+    """
+    if not is_tts_enabled():
+        _log_fallback_once(
+            "ENABLE_TTS=false"
+            if not settings.ENABLE_TTS
+            else (_tts_suppressed_reason or "ELEVENLABS not configured")
+        )
+        return {
+            "audio_bytes": b"",
+            "mime_type": "audio/mpeg",
+            "latency_ms": 0,
+            "fallback_mode": True,
+        }
+
+    tts = get_tts_service()
+    if not tts:
+        _log_fallback_once("TTS service unavailable")
+        return {
+            "audio_bytes": b"",
+            "mime_type": "audio/mpeg",
+            "latency_ms": 0,
+            "fallback_mode": True,
+        }
+
+    try:
+        result = await asyncio.wait_for(
+            tts.synthesize_speech(text, language=language),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[TTS] Timed out after %.0fs — text-only fallback", timeout_sec)
+        return {
+            "audio_bytes": b"",
+            "mime_type": "audio/mpeg",
+            "latency_ms": timeout_sec * 1000,
+            "fallback_mode": True,
+        }
+    except Exception as exc:
+        logger.warning("[TTS] Unexpected error (%s) — text-only fallback", exc)
+        return {
+            "audio_bytes": b"",
+            "mime_type": "audio/mpeg",
+            "latency_ms": 0,
+            "fallback_mode": True,
+        }
+
+    if result.get("fallback_mode") or not result.get("audio_bytes"):
+        return {
+            "audio_bytes": b"",
+            "mime_type": result.get("mime_type", "audio/mpeg"),
+            "latency_ms": result.get("latency_ms", 0),
+            "fallback_mode": True,
+        }
+
+    return {
+        "audio_bytes": result["audio_bytes"],
+        "mime_type": result.get("mime_type", "audio/mpeg"),
+        "latency_ms": result.get("latency_ms", 0),
+        "fallback_mode": False,
+    }

@@ -1,17 +1,34 @@
-from typing import AsyncGenerator
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
-from backend.app.core.config import settings
+from typing import Any, AsyncGenerator
 
-# Create async engine. In production, we'd configure pool settings like pool_size, max_overflow.
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+
+from app.core.config import settings
+
+
+def _build_engine_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "echo": settings.DEBUG,
+        "future": True,
+    }
+
+    if settings.uses_sqlite:
+        kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        kwargs["pool_pre_ping"] = True
+
+    return kwargs
+
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    future=True,
-    pool_pre_ping=True,
+    settings.async_database_url,
+    **_build_engine_kwargs(),
 )
 
-# Async session factory
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -23,6 +40,7 @@ AsyncSessionLocal = async_sessionmaker(
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy database models."""
+
     pass
 
 

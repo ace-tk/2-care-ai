@@ -14,7 +14,8 @@ class LLMService:
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Guard: allow startup even without a valid OpenAI key
+        self.client = AsyncOpenAI(api_key=api_key or "sk-placeholder")
         
         # Base system prompt for healthcare appointment assistant behavior
         self.system_prompt = (
@@ -24,11 +25,16 @@ class LLMService:
             "Do not simulate booking actions or tool calls yet, but guide the user conversationally as if you were preparing to perform those actions. "
             "If a user asks about medical advice, politely decline and redirect them to speak with a physician."
         )
-        logger.info("OpenAI LLM service initialized with GPT-4o-mini.")
+        logger.info("LLM service initialized.")
         
-        # Initialize LangGraph Orchestrator
-        from backend.app.services.orchestrator_graph import build_orchestrator_graph
-        self.orchestrator = build_orchestrator_graph(api_key)
+        # Initialize LangGraph Orchestrator (optional — requires valid OpenAI key)
+        self.orchestrator = None
+        try:
+            if api_key and not api_key.startswith("sk-placeholder"):
+                from app.workflows.orchestrator import build_orchestrator_graph
+                self.orchestrator = build_orchestrator_graph(api_key)
+        except Exception as e:
+            logger.warning(f"LangGraph orchestrator init skipped: {e}")
 
     def _build_messages(self, prompt: str, history: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Helper to build OpenAI messages array from session history."""

@@ -2,11 +2,17 @@ from datetime import datetime, timedelta
 from typing import List
 from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.models.appointment import Appointment
+from app.models.appointment import Appointment
+
+
+def _now() -> datetime:
+    """Local wall-clock time for patient-facing scheduling."""
+    return datetime.now().replace(microsecond=0)
+
 
 async def check_availability(db: AsyncSession, doctor_id: int, start_time: datetime, end_time: datetime) -> bool:
     """Check if a doctor is available between start_time and end_time."""
-    if start_time < datetime.utcnow():
+    if start_time <= _now():
         return False
         
     query = select(Appointment).where(
@@ -22,34 +28,51 @@ async def check_availability(db: AsyncSession, doctor_id: int, start_time: datet
     conflicts = result.scalars().all()
     return len(conflicts) == 0
 
-async def suggest_alternative_slots(db: AsyncSession, doctor_id: int, requested_start: datetime, duration_minutes: int = 30) -> List[dict]:
-    """Suggest alternative slots if requested slot is booked."""
-    suggestions = []
-    current_time = requested_start.replace(minute=0, second=0, microsecond=0)
-    if current_time < datetime.utcnow():
-        current_time = datetime.utcnow().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        
-    end_check_time = current_time + timedelta(days=7)
-    
-    while current_time < end_check_time and len(suggestions) < 3:
-        slot_end = current_time + timedelta(minutes=duration_minutes)
-        # Business hours check: 9 AM to 5 PM, Monday to Friday
-        if 9 <= current_time.hour < 17 and current_time.weekday() < 5:
-            is_avail = await check_availability(db, doctor_id, current_time, slot_end)
-            if is_avail:
-                suggestions.append({
-                    "start": current_time.isoformat(),
-                    "end": slot_end.isoformat()
-                })
-        current_time += timedelta(minutes=30)
-        
+async def suggest_alternative_slots(
+    db: AsyncSession,
+    doctor_id: int,
+    requested_start: datetime,
+    duration_minutes: int = 30,
+) -> List[dict]:
+    """Suggest alternative slots using the doctor's weekly slot template."""
+    from app.models.doctor import Doctor
+
+    doctor = await db.get(Doctor, doctor_id)
+    if not doctor or not doctor.available_slots:
+        return []
+
+    suggestions: List[dict] = []
+    for day_offset in range(8):
+        if len(suggestions) >= 5:
+            break
+        check_date = requested_start.date() + timedelta(days=day_offset)
+        for time_str in doctor.available_slots:
+            try:
+                hour, minute = map(int, time_str.split(":"))
+            except ValueError:
+                continue
+            slot_start = datetime.combine(
+                check_date, datetime.min.time().replace(hour=hour, minute=minute)
+            )
+            if slot_start <= _now():
+                continue
+            slot_end = slot_start + timedelta(minutes=duration_minutes)
+            if await check_availability(db, doctor_id, slot_start, slot_end):
+                suggestions.append(
+                    {
+                        "start": slot_start.strftime("%Y-%m-%d %H:%M"),
+                        "end": slot_end.strftime("%Y-%m-%d %H:%M"),
+                    }
+                )
+            if len(suggestions) >= 5:
+                break
     return suggestions
 
 async def create_appointment(
     db: AsyncSession, patient_id: int, doctor_id: int, start_time: datetime, end_time: datetime, reason: str
 ) -> Appointment:
     """Create a new appointment, preventing double booking and past slots."""
-    if start_time <= datetime.utcnow():
+    if start_time <= _now():
         raise ValueError("Cannot book appointments in the past.")
         
     is_avail = await check_availability(db, doctor_id, start_time, end_time)
@@ -88,7 +111,7 @@ async def reschedule_appointment(
     if not appointment:
         raise ValueError("Appointment not found.")
         
-    if new_start <= datetime.utcnow():
+    if new_start <= _now():
         raise ValueError("Cannot reschedule to the past.")
         
     # Check availability excluding the current appointment

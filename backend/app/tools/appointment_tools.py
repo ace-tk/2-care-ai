@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 from datetime import datetime
-from backend.app.core.database import AsyncSessionLocal
-from backend.app.services.appointment_service import (
+from app.core.database import AsyncSessionLocal
+from app.services.appointment_service import (
     check_availability,
     suggest_alternative_slots,
     create_appointment,
@@ -69,7 +69,7 @@ async def reschedule_appointment_tool(appointment_id: int, new_start_iso: str, n
         except ValueError as e:
             err_msg = str(e)
             if "not available" in err_msg.lower():
-                from backend.app.models.appointment import Appointment
+                from app.models.appointment import Appointment
                 appt = await db.get(Appointment, appointment_id)
                 if appt:
                     alts = await suggest_alternative_slots(db, appt.doctor_id, new_start)

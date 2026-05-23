@@ -1,7 +1,7 @@
 import logging
 import sys
 from pathlib import Path
-from backend.app.core.config import settings
+from app.core.config import settings
 
 # Create logs directory if it doesn't exist
 LOGS_DIR = Path("logs")

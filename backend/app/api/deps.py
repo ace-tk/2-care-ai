@@ -2,9 +2,9 @@ from typing import AsyncGenerator
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.core.database import get_db
-from backend.app.core.security import verify_token
-from backend.app.models.user import User
+from app.core.database import get_db
+from app.core.security import verify_token
+from app.models.user import User
 
 reusable_oauth2 = OAuth2PasswordBearer(
     tokenUrl=f"/api/v1/auth/login"
